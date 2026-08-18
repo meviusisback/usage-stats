@@ -1,0 +1,5 @@
+name: opencode-usage
+version: 1.3.2
+description: "Model-gated usage/balance (OpenCode Go windows, OpenRouter, DeepSeek) for the Hermes Desktop status bar"
+author: meviusisback
+kind: standalone

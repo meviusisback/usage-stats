@@ -1,0 +1,13 @@
+{
+  "name": "opencode-usage",
+  "label": "OpenCode Usage",
+  "description": "Backend API for the OpenCode Go desktop usage chip.",
+  "icon": "Activity",
+  "version": "1.0.2",
+  "tab": {
+    "path": "/opencode-usage",
+    "hidden": true
+  },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}
