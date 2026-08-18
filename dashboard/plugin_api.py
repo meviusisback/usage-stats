@@ -144,6 +144,28 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _extract_balance(
+    body: dict[str, Any],
+    field_names: tuple[str, ...],
+    *,
+    unwrap_data: bool = False,
+) -> float | None:
+    """Find a numeric balance value in a response dict.
+
+    Tries ``field_names`` in order, then falls back to the first numeric
+    top-level value.  Returns ``None`` if nothing found.
+    """
+    inner = body.get("data") if unwrap_data and isinstance(body.get("data"), dict) else body
+    for key in field_names:
+        if key in inner:
+            return _safe_float(inner[key])
+    # Fallback: first numeric value
+    for val in inner.values():
+        if isinstance(val, (int, float)):
+            return float(val)
+    return None
+
+
 # --- provider fetchers --------------------------------------------------------
 
 def _fetch_opencode(api_key: str) -> dict[str, Any]:
@@ -249,29 +271,12 @@ def _fetch_kimi(api_key: str) -> dict[str, Any]:
 
 
 def _fetch_novita(api_key: str) -> dict[str, Any]:
-    """NovitaAI balance — GET api.novita.ai/v3/account/balance.
-
-    Response shape (hypothesized from endpoint behavior):
-        {balance: float} or {credits: float, ...}
-    """
+    """NovitaAI balance — GET api.novita.ai/v3/account/balance."""
     body = _request_json(NOVITA_BALANCE_URL, api_key)
     if not isinstance(body, dict):
         return {"error": "unexpected-response"}
 
-    # Try common field names for the balance value
-    balance = None
-    for key in ("balance", "credits", "remaining", "available"):
-        if key in body:
-            balance = _safe_float(body[key])
-            break
-
-    if balance is None:
-        # Fall back to top-level numeric fields
-        for key, val in body.items():
-            if isinstance(val, (int, float)):
-                balance = float(val)
-                break
-
+    balance = _extract_balance(body, ("balance", "credits", "remaining", "available"))
     if balance is None:
         return {"error": "unexpected-response"}
 
@@ -285,31 +290,12 @@ def _fetch_novita(api_key: str) -> dict[str, Any]:
 
 
 def _fetch_zai(api_key: str) -> dict[str, Any]:
-    """ZAI / Zhipu balance — GET open.bigmodel.cn/api/paas/v4/user/balance.
-
-    Response shape (hypothesized):
-        {balance: float, ...} or {data: {balance: float}}
-    Currency: CNY.
-    """
+    """ZAI / Zhipu balance — GET open.bigmodel.cn/api/paas/v4/user/balance."""
     body = _request_json(ZAI_BALANCE_URL, api_key)
     if not isinstance(body, dict):
         return {"error": "unexpected-response"}
 
-    # Unwrap {data: {...}} if present
-    inner = body.get("data") if isinstance(body.get("data"), dict) else body
-
-    balance = None
-    for key in ("balance", "remaining", "available", "quota"):
-        if key in inner:
-            balance = _safe_float(inner[key])
-            break
-
-    if balance is None:
-        for key, val in inner.items():
-            if isinstance(val, (int, float)):
-                balance = float(val)
-                break
-
+    balance = _extract_balance(body, ("balance", "remaining", "available", "quota"), unwrap_data=True)
     if balance is None:
         return {"error": "unexpected-response"}
 
@@ -323,37 +309,17 @@ def _fetch_zai(api_key: str) -> dict[str, Any]:
 
 
 def _fetch_alibaba(api_key: str) -> dict[str, Any]:
-    """Alibaba / DashScope billing — GET dashscope.aliyuncs.com/api/v1/services/billing/usage.
-
-    Response shape (hypothesized from billing API):
-        {data: {total_cost: float, currency: str}} or {balance: float}
-    """
+    """Alibaba / DashScope billing — GET dashscope.aliyuncs.com/api/v1/services/billing/usage."""
     body = _request_json(ALIBABA_BILLING_URL, api_key)
     if not isinstance(body, dict):
         return {"error": "unexpected-response"}
 
-    # Unwrap {data: {...}} if present
     inner = body.get("data") if isinstance(body.get("data"), dict) else body
-
-    balance = None
-    currency = "CNY"
-    for key in ("balance", "remaining", "available", "total_cost", "quota"):
-        if key in inner:
-            balance = _safe_float(inner[key])
-            break
-
-    if "currency" in inner:
-        currency = str(inner["currency"])
-
-    if balance is None:
-        for key, val in inner.items():
-            if isinstance(val, (int, float)):
-                balance = float(val)
-                break
-
+    balance = _extract_balance(body, ("balance", "remaining", "available", "total_cost", "quota"), unwrap_data=True)
     if balance is None:
         return {"error": "unexpected-response"}
 
+    currency = str(inner.get("currency", "CNY")) if isinstance(inner, dict) else "CNY"
     return {
         "kind": "balance",
         "label": f"{balance:,.2f} {currency}",
@@ -364,27 +330,12 @@ def _fetch_alibaba(api_key: str) -> dict[str, Any]:
 
 
 def _fetch_arcee(api_key: str) -> dict[str, Any]:
-    """Arcee AI balance — GET api.arcee.ai/v2/user/balance.
-
-    Response shape (hypothesized):
-        {balance: float, ...} or {credits: float}
-    """
+    """Arcee AI balance — GET api.arcee.ai/v2/user/balance."""
     body = _request_json(ARCEE_BALANCE_URL, api_key)
     if not isinstance(body, dict):
         return {"error": "unexpected-response"}
 
-    balance = None
-    for key in ("balance", "credits", "remaining", "available"):
-        if key in body:
-            balance = _safe_float(body[key])
-            break
-
-    if balance is None:
-        for key, val in body.items():
-            if isinstance(val, (int, float)):
-                balance = float(val)
-                break
-
+    balance = _extract_balance(body, ("balance", "credits", "remaining", "available"))
     if balance is None:
         return {"error": "unexpected-response"}
 
