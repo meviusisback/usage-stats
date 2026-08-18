@@ -18,7 +18,7 @@ def test_agent_manifest_uses_a_supported_kind_and_registration_shim():
     text = (ROOT / "plugin.yaml").read_text(encoding="utf-8")
     package = (ROOT / "__init__.py").read_text(encoding="utf-8")
 
-    assert "name: opencode-usage" in text
+    assert "name: usage-stats" in text
     assert "kind: standalone" in text
     assert "def register(ctx)" in package
 

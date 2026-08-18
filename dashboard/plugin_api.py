@@ -1,4 +1,4 @@
-"""OpenCode Usage → multi-provider usage/balance for the Hermes desktop plugin.
+"""Usage Stats → multi-provider usage/balance for the Hermes desktop plugin.
 
 Hermes discovers this file through ``dashboard/manifest.json`` and mounts the
 module-level FastAPI ``router`` under ``/api/plugins/opencode-usage``.
@@ -8,6 +8,17 @@ Endpoints
 GET /health   → liveness + which providers have a key configured
 GET /usage    → OpenCode Go usage only (backward-compatible shape)
 GET /summary  → usage/balance for EVERY configured provider (the real one)
+
+Supported providers
+-------------------
+- OpenCode Go  (% used: rolling 5h / weekly / monthly)
+- OpenRouter   (credit balance $)
+- DeepSeek     (account balance $)
+- Kimi         (balance ¥ — Moonshot/Kimi Coding)
+- NovitaAI     (account balance)
+- ZAI / Zhipu  (balance ¥)
+- Alibaba      (DashScope billing)
+- Arcee AI     (balance)
 """
 
 from __future__ import annotations
@@ -29,9 +40,14 @@ router = APIRouter()
 USAGE_API_URL = "https://opencode.ai/zen/go/v1/usage"
 OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
 DEEPSEEK_BALANCE_URL = "https://api.deepseek.com/user/balance"
+KIMI_BALANCE_URL = "https://api.moonshot.cn/v1/users/me/balance"
+NOVITA_BALANCE_URL = "https://api.novita.ai/v3/account/balance"
+ZAI_BALANCE_URL = "https://open.bigmodel.cn/api/paas/v4/user/balance"
+ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/services/billing/usage"
+ARCEE_BALANCE_URL = "https://api.arcee.ai/v2/user/balance"
 TIMEOUT_SECONDS = 15
 MAX_RESPONSE_BYTES = 4096
-USER_AGENT = "Mozilla/5.0 (Hermes-Agent; opencode-usage)"
+USER_AGENT = "Mozilla/5.0 (Hermes-Agent; usage-stats)"
 WINDOWS = [
     {"id": "rolling", "label": "5h"},
     {"id": "weekly", "label": "W"},
@@ -115,11 +131,20 @@ def _payload(*, error: str | None, usage: dict[str, Any] | None) -> dict[str, An
     }
 
 
-# --- provider metrics (summary) ----------------------------------------------
+# --- helpers ------------------------------------------------------------------
 
 def _pct(value: Any) -> str:
     return f"{round(value)}%" if value is not None else "—"
 
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# --- provider fetchers --------------------------------------------------------
 
 def _fetch_opencode(api_key: str) -> dict[str, Any]:
     body = _request_usage(api_key)
@@ -162,12 +187,8 @@ def _fetch_openrouter(api_key: str) -> dict[str, Any]:
     if not isinstance(data, dict) or data.get("total_credits") is None or data.get("total_usage") is None:
         return {"error": "unexpected-response"}
 
-    try:
-        total = float(data["total_credits"])
-        used = float(data["total_usage"])
-    except (TypeError, ValueError):
-        return {"error": "unexpected-response"}
-
+    total = _safe_float(data["total_credits"])
+    used = _safe_float(data["total_usage"])
     remaining = max(0.0, total - used)
     pct_used = (used / total * 100.0) if total > 0 else 0.0
     return {
@@ -192,10 +213,7 @@ def _fetch_deepseek(api_key: str) -> dict[str, Any]:
         if not isinstance(info, dict):
             continue
         currency = info.get("currency") or currency
-        try:
-            total += float(info.get("total_balance") or 0)
-        except (TypeError, ValueError):
-            continue
+        total += _safe_float(info.get("total_balance"))
 
     value = round(total, 2)
     return {
@@ -207,7 +225,180 @@ def _fetch_deepseek(api_key: str) -> dict[str, Any]:
     }
 
 
-# id, display label, env keys (first found wins), fetcher
+def _fetch_kimi(api_key: str) -> dict[str, Any]:
+    """Kimi / Moonshot balance — GET api.moonshot.cn/v1/users/me/balance.
+
+    Response shape (from platform.kimi.ai docs):
+        {available: float, voucher: float, cash: float}
+    Currency: CNY.
+    """
+    body = _request_json(KIMI_BALANCE_URL, api_key)
+    if not isinstance(body, dict) or "available" not in body:
+        return {"error": "unexpected-response"}
+
+    available = _safe_float(body.get("available"))
+    voucher = _safe_float(body.get("voucher"))
+    cash = _safe_float(body.get("cash"))
+    return {
+        "kind": "balance",
+        "label": f"¥{available:,.2f}",
+        "value": round(available, 2),
+        "currency": "CNY",
+        "detail": f"balance ¥{available:,.2f} (voucher ¥{voucher:,.2f}, cash ¥{cash:,.2f})",
+    }
+
+
+def _fetch_novita(api_key: str) -> dict[str, Any]:
+    """NovitaAI balance — GET api.novita.ai/v3/account/balance.
+
+    Response shape (hypothesized from endpoint behavior):
+        {balance: float} or {credits: float, ...}
+    """
+    body = _request_json(NOVITA_BALANCE_URL, api_key)
+    if not isinstance(body, dict):
+        return {"error": "unexpected-response"}
+
+    # Try common field names for the balance value
+    balance = None
+    for key in ("balance", "credits", "remaining", "available"):
+        if key in body:
+            balance = _safe_float(body[key])
+            break
+
+    if balance is None:
+        # Fall back to top-level numeric fields
+        for key, val in body.items():
+            if isinstance(val, (int, float)):
+                balance = float(val)
+                break
+
+    if balance is None:
+        return {"error": "unexpected-response"}
+
+    return {
+        "kind": "balance",
+        "label": f"${balance:,.2f}",
+        "value": round(balance, 2),
+        "currency": "USD",
+        "detail": f"balance ${balance:,.2f}",
+    }
+
+
+def _fetch_zai(api_key: str) -> dict[str, Any]:
+    """ZAI / Zhipu balance — GET open.bigmodel.cn/api/paas/v4/user/balance.
+
+    Response shape (hypothesized):
+        {balance: float, ...} or {data: {balance: float}}
+    Currency: CNY.
+    """
+    body = _request_json(ZAI_BALANCE_URL, api_key)
+    if not isinstance(body, dict):
+        return {"error": "unexpected-response"}
+
+    # Unwrap {data: {...}} if present
+    inner = body.get("data") if isinstance(body.get("data"), dict) else body
+
+    balance = None
+    for key in ("balance", "remaining", "available", "quota"):
+        if key in inner:
+            balance = _safe_float(inner[key])
+            break
+
+    if balance is None:
+        for key, val in inner.items():
+            if isinstance(val, (int, float)):
+                balance = float(val)
+                break
+
+    if balance is None:
+        return {"error": "unexpected-response"}
+
+    return {
+        "kind": "balance",
+        "label": f"¥{balance:,.2f}",
+        "value": round(balance, 2),
+        "currency": "CNY",
+        "detail": f"balance ¥{balance:,.2f}",
+    }
+
+
+def _fetch_alibaba(api_key: str) -> dict[str, Any]:
+    """Alibaba / DashScope billing — GET dashscope.aliyuncs.com/api/v1/services/billing/usage.
+
+    Response shape (hypothesized from billing API):
+        {data: {total_cost: float, currency: str}} or {balance: float}
+    """
+    body = _request_json(ALIBABA_BILLING_URL, api_key)
+    if not isinstance(body, dict):
+        return {"error": "unexpected-response"}
+
+    # Unwrap {data: {...}} if present
+    inner = body.get("data") if isinstance(body.get("data"), dict) else body
+
+    balance = None
+    currency = "CNY"
+    for key in ("balance", "remaining", "available", "total_cost", "quota"):
+        if key in inner:
+            balance = _safe_float(inner[key])
+            break
+
+    if "currency" in inner:
+        currency = str(inner["currency"])
+
+    if balance is None:
+        for key, val in inner.items():
+            if isinstance(val, (int, float)):
+                balance = float(val)
+                break
+
+    if balance is None:
+        return {"error": "unexpected-response"}
+
+    return {
+        "kind": "balance",
+        "label": f"{balance:,.2f} {currency}",
+        "value": round(balance, 2),
+        "currency": currency,
+        "detail": f"balance {balance:,.2f} {currency}",
+    }
+
+
+def _fetch_arcee(api_key: str) -> dict[str, Any]:
+    """Arcee AI balance — GET api.arcee.ai/v2/user/balance.
+
+    Response shape (hypothesized):
+        {balance: float, ...} or {credits: float}
+    """
+    body = _request_json(ARCEE_BALANCE_URL, api_key)
+    if not isinstance(body, dict):
+        return {"error": "unexpected-response"}
+
+    balance = None
+    for key in ("balance", "credits", "remaining", "available"):
+        if key in body:
+            balance = _safe_float(body[key])
+            break
+
+    if balance is None:
+        for key, val in body.items():
+            if isinstance(val, (int, float)):
+                balance = float(val)
+                break
+
+    if balance is None:
+        return {"error": "unexpected-response"}
+
+    return {
+        "kind": "balance",
+        "label": f"${balance:,.2f}",
+        "value": round(balance, 2),
+        "currency": "USD",
+        "detail": f"balance ${balance:,.2f}",
+    }
+
+
+# --- provider registry --------------------------------------------------------
+
 PROVIDER_SPECS: list[dict[str, Any]] = [
     {
         "id": "opencode",
@@ -230,8 +421,45 @@ PROVIDER_SPECS: list[dict[str, Any]] = [
         "key_envs": ["DEEPSEEK_API_KEY"],
         "fetch": _fetch_deepseek,
     },
+    {
+        "id": "kimi",
+        "name": "Kimi",
+        "display": "KI",
+        "key_envs": ["KIMI_API_KEY"],
+        "fetch": _fetch_kimi,
+    },
+    {
+        "id": "novita",
+        "name": "NovitaAI",
+        "display": "NV",
+        "key_envs": ["NOVITA_API_KEY"],
+        "fetch": _fetch_novita,
+    },
+    {
+        "id": "zai",
+        "name": "ZAI",
+        "display": "Z",
+        "key_envs": ["ZAI_API_KEY", "GLM_API_KEY"],
+        "fetch": _fetch_zai,
+    },
+    {
+        "id": "alibaba",
+        "name": "Alibaba",
+        "display": "AB",
+        "key_envs": ["DASHSCOPE_API_KEY"],
+        "fetch": _fetch_alibaba,
+    },
+    {
+        "id": "arcee",
+        "name": "Arcee AI",
+        "display": "AR",
+        "key_envs": ["ARCEE_API_KEY"],
+        "fetch": _fetch_arcee,
+    },
 ]
 
+
+# --- transport error mapping --------------------------------------------------
 
 def _transport_error(exc: Exception) -> str:
     if isinstance(exc, urllib.error.HTTPError):

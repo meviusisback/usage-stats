@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 
 ROOT = Path(__file__).resolve().parents[1]
-MODULE_NAME = "opencode_usage_test_plugin_api"
+MODULE_NAME = "usage_stats_test_plugin_api"
 SPEC = importlib.util.spec_from_file_location(MODULE_NAME, ROOT / "dashboard" / "plugin_api.py")
 assert SPEC and SPEC.loader
 plugin_api = importlib.util.module_from_spec(SPEC)
@@ -20,6 +20,12 @@ PROVIDER_ENV_KEYS = [
     "OPENCODE_ZEN_API_KEY",
     "OPENROUTER_API_KEY",
     "DEEPSEEK_API_KEY",
+    "KIMI_API_KEY",
+    "NOVITA_API_KEY",
+    "ZAI_API_KEY",
+    "GLM_API_KEY",
+    "DASHSCOPE_API_KEY",
+    "ARCEE_API_KEY",
 ]
 
 
@@ -33,6 +39,8 @@ def clear_provider_keys(monkeypatch):
     for name in PROVIDER_ENV_KEYS:
         monkeypatch.delenv(name, raising=False)
 
+
+# --- health / usage (backward-compatible) ------------------------------------
 
 def test_health_route_is_mounted_at_the_desktop_namespace(monkeypatch):
     clear_provider_keys(monkeypatch)
@@ -223,3 +231,116 @@ def test_fetch_opencode_exposes_individual_windows(monkeypatch):
     ]
     assert metric["label"] == "40%"
     assert metric["kind"] == "percent"
+
+
+# --- new providers (mocked fetchers) -----------------------------------------
+
+def test_fetch_kimi_normalizes_response(monkeypatch):
+    fake = {"available": 42.50, "voucher": 10.00, "cash": 32.50}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_kimi("test-key")
+
+    assert metric["kind"] == "balance"
+    assert metric["value"] == 42.5
+    assert metric["currency"] == "CNY"
+    assert "¥42" in metric["label"]
+    assert "voucher ¥10" in metric["detail"]
+    assert "cash ¥32" in metric["detail"]
+
+
+def test_fetch_kimi_handles_zero_balance(monkeypatch):
+    fake = {"available": 0, "voucher": 0, "cash": 0}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_kimi("test-key")
+
+    assert metric["kind"] == "balance"
+    assert metric["value"] == 0.0
+    assert metric["label"] == "¥0.00"
+
+
+def test_fetch_kimi_unexpected_response(monkeypatch):
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: {"error": "bad"})
+
+    metric = plugin_api._fetch_kimi("test-key")
+
+    assert metric["error"] == "unexpected-response"
+
+
+def test_fetch_novita_normalizes_response(monkeypatch):
+    fake = {"balance": 1500.50}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_novita("test-key")
+
+    assert metric["kind"] == "balance"
+    assert metric["value"] == 1500.5
+    assert metric["currency"] == "USD"
+    assert "$1,500" in metric["label"]
+
+
+def test_fetch_novita_with_credits_field(monkeypatch):
+    fake = {"credits": 200.0}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_novita("test-key")
+
+    assert metric["value"] == 200.0
+
+
+def test_fetch_zai_normalizes_response(monkeypatch):
+    fake = {"balance": 88.88}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_zai("test-key")
+
+    assert metric["kind"] == "balance"
+    assert metric["value"] == 88.88
+    assert metric["currency"] == "CNY"
+    assert "¥88" in metric["label"]
+
+
+def test_fetch_zai_unwraps_data(monkeypatch):
+    fake = {"data": {"balance": 50.0}}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_zai("test-key")
+
+    assert metric["value"] == 50.0
+
+
+def test_fetch_alibaba_normalizes_response(monkeypatch):
+    fake = {"data": {"total_cost": 123.45, "currency": "CNY"}}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_alibaba("test-key")
+
+    assert metric["kind"] == "balance"
+    assert metric["value"] == 123.45
+    assert metric["currency"] == "CNY"
+
+
+def test_fetch_arcee_normalizes_response(monkeypatch):
+    fake = {"balance": 75.00}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_arcee("test-key")
+
+    assert metric["kind"] == "balance"
+    assert metric["value"] == 75.0
+    assert metric["currency"] == "USD"
+    assert "$75" in metric["label"]
+
+
+def test_all_providers_registered():
+    ids = [spec["id"] for spec in plugin_api.PROVIDER_SPECS]
+    assert "opencode" in ids
+    assert "openrouter" in ids
+    assert "deepseek" in ids
+    assert "kimi" in ids
+    assert "novita" in ids
+    assert "zai" in ids
+    assert "alibaba" in ids
+    assert "arcee" in ids
+    assert len(ids) == 8
