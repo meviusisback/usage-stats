@@ -498,4 +498,10 @@ def summary() -> dict[str, Any]:
             idx = futures[future]
             providers[idx] = future.result()
 
-    return {"providers": providers}
+    return {
+        "providers": providers,
+        "apiKeyConfigured": {
+            spec["id"]: any(_read_key(env) for env in spec["key_envs"])
+            for spec in PROVIDER_SPECS
+        },
+    }

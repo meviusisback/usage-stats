@@ -191,6 +191,34 @@ def test_summary_marks_provider_without_key(monkeypatch):
     assert body["providers"][0]["label"] is None
 
 
+def test_summary_exposes_api_key_configured_map(monkeypatch):
+    specs = [
+        {"id": "opencode", "name": "OpenCode Go", "display": "OC",
+         "key_envs": ["OPENCODE_GO_API_KEY"], "fetch": lambda key: {}},
+        {"id": "openrouter", "name": "OpenRouter", "display": "OR",
+         "key_envs": ["OPENROUTER_API_KEY"], "fetch": lambda key: {}},
+    ]
+    monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", specs)
+    monkeypatch.setattr(plugin_api, "_read_key", lambda env: "x" if env == "OPENCODE_GO_API_KEY" else None)
+
+    body = make_client().get("/api/plugins/opencode-usage/summary").json()
+
+    assert body["apiKeyConfigured"] == {"opencode": True, "openrouter": False}
+
+
+def test_summary_api_key_configured_all_false_when_no_keys(monkeypatch):
+    specs = [
+        {"id": "opencode", "name": "OpenCode Go", "display": "OC",
+         "key_envs": ["OPENCODE_GO_API_KEY"], "fetch": lambda key: {}},
+    ]
+    monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", specs)
+    monkeypatch.setattr(plugin_api, "_read_key", lambda env: None)
+
+    body = make_client().get("/api/plugins/opencode-usage/summary").json()
+
+    assert body["apiKeyConfigured"] == {"opencode": False}
+
+
 def test_summary_sanitizes_transport_errors(monkeypatch):
     def boom(_key):
         raise urllib.error.HTTPError("url", 403, "forbidden", None, None)

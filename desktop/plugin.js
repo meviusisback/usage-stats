@@ -4,20 +4,41 @@
  * Shows usage/balance for ONLY the provider backing the currently-selected
  * model, and switches automatically when the model changes.
  *
- * Right-click the chip: "Aggiorna" / "Nascondi".
+ * Right-click the chip: "Aggiorna" / "Nascondi" / "Configura chiavi".
  * Re-show: ⌘K → "Usage Stats: Mostra".
+ *
+ * SECURITY: API keys are NEVER transmitted over the network by this plugin.
+ * The "Configura chiavi" dialog collects them in masked password inputs and
+ * copies the formatted `KEY=VALUE` lines to the local clipboard (or the
+ * Desktop's native clipboard bridge) — the user pastes them into ~/.hermes/.env
+ * themselves. No key ever leaves the local machine via a plugin request.
  */
 import {
   Tip, cn, host, useValue,
   ContextMenu, ContextMenuTrigger, ContextMenuContent,
   ContextMenuItem, ContextMenuSeparator,
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+  Input,
   PALETTE_AREA,
 } from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 const ID = 'usage-stats'
 const REFRESH_MS = 60_000
+
+// Provider → list of .env keys the plugin looks for (first match wins).
+// `name` is shown in the config dialog; `autoKey` is the canonical key name.
+const KEY_SPECS = [
+  { id: 'opencode', name: 'OpenCode Go', autoKey: 'OPENCODE_GO_API_KEY', altKeys: ['OPENCODE_ZEN_API_KEY'] },
+  { id: 'openrouter', name: 'OpenRouter', autoKey: 'OPENROUTER_API_KEY', altKeys: [] },
+  { id: 'deepseek', name: 'DeepSeek', autoKey: 'DEEPSEEK_API_KEY', altKeys: [] },
+  { id: 'kimi', name: 'Kimi / Moonshot', autoKey: 'KIMI_API_KEY', altKeys: [] },
+  { id: 'novita', name: 'NovitaAI', autoKey: 'NOVITA_API_KEY', altKeys: [] },
+  { id: 'zai', name: 'ZAI / Zhipu', autoKey: 'ZAI_API_KEY', altKeys: ['GLM_API_KEY'] },
+  { id: 'alibaba', name: 'Alibaba / DashScope', autoKey: 'DASHSCOPE_API_KEY', altKeys: [] },
+  { id: 'arcee', name: 'Arcee AI', autoKey: 'ARCEE_API_KEY', altKeys: [] },
+]
 
 function percentTone(value) {
   if (value == null) return 'var(--ui-text-quaternary)'
@@ -90,15 +111,123 @@ function renderProvider(provider) {
   return [jsx(ProviderBadge, { key: provider.id, provider })]
 }
 
+// --- Config dialog: masked inputs → copy to local clipboard (NEVER network) ---
+function ConfigDialog({ open, onOpenChange, configured }) {
+  const [values, setValues] = useState({})
+  const [copied, setCopied] = useState(false)
+
+  // Seed the dialog with the env key names so the user knows what to paste where.
+  const rows = useMemo(() => KEY_SPECS.map((spec) => ({
+    ...spec,
+    configured: configured ? !!configured[spec.id]?.configured : false,
+  })), [configured])
+
+  const onChange = useCallback((key, value) => {
+    setValues((prev) => ({ ...prev, [key]: value }))
+    setCopied(false)
+  }, [])
+
+  const copyAll = useCallback(async () => {
+    const lines = KEY_SPECS
+      .map((spec) => {
+        const v = values[spec.autoKey]
+        return v ? `${spec.autoKey}=${v}` : null
+      })
+      .filter(Boolean)
+    if (lines.length === 0) return
+    try {
+      if (window.hermesDesktop?.writeClipboard) {
+        await window.hermesDesktop.writeClipboard(lines.join('\n'))
+      } else if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(lines.join('\n'))
+      } else {
+        return
+      }
+      setCopied(true)
+    } catch {
+      setCopied(false)
+    }
+  }, [values])
+
+  return jsx(Dialog, {
+    open,
+    onOpenChange,
+    children: jsx(DialogContent, {
+      className: 'max-w-md',
+      children: [
+        jsx(DialogHeader, {
+          key: 'h',
+          children: [
+            jsx(DialogTitle, { key: 't', children: 'Configura chiavi provider' }),
+            jsx(DialogDescription, {
+              key: 'd',
+              children: 'Le chiavi sono mascherate e copiate solo negli appunti locali — non transitano mai sulla rete. Incolla poi il testo in ~/.hermes/.env',
+            }),
+          ],
+        }),
+        jsx('div', {
+          key: 'body',
+          className: 'flex flex-col gap-2 py-2',
+          children: rows.map((row) => jsx('div', {
+            key: row.id,
+            className: 'flex flex-col gap-1',
+            children: [
+              jsx('label', {
+                className: 'text-[0.7rem] text-(--ui-text-secondary) flex items-center gap-1',
+                children: [
+                  row.name,
+                  row.configured ? jsx('span', { key: 'ok', className: 'text-(--ui-text-quaternary)', children: '(già configurata)' }) : null,
+                ],
+              }),
+              jsx(Input, {
+                type: 'password',
+                autoComplete: 'off',
+                spellCheck: false,
+                placeholder: row.autoKey,
+                value: values[row.autoKey] ?? '',
+                'data-1p-ignore': 'true',
+                'data-lp-ignore': 'true',
+                'data-bw-ignore': 'true',
+                onChange: (e) => onChange(row.autoKey, e.target.value),
+              }),
+            ],
+          })),
+        }),
+        jsx(DialogFooter, {
+          key: 'f',
+          children: [
+            jsx('button', {
+              type: 'button',
+              className: cn(
+                'inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-[0.75rem]',
+                'bg-(--chrome-action) text-(--chrome-action-fg) hover:opacity-90',
+              ),
+              onClick: () => void copyAll(),
+              children: copied ? 'Copiato! ✓' : 'Copia negli appunti',
+              disabled: KEY_SPECS.every((s) => !values[s.autoKey]),
+            }),
+            jsx('button', {
+              type: 'button',
+              className: 'inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-[0.75rem] text-(--ui-text-secondary) hover:bg-accent',
+              onClick: () => onOpenChange(false),
+              children: 'Chiudi',
+            }),
+          ],
+        }),
+      ],
+    }),
+  })
+}
+
 function UsageChip({ rest, storage }) {
   const [summary, setSummary] = useState(null)
   const [fetchError, setFetchError] = useState(null)
   const [activeProvider, setActiveProvider] = useState(null)
   const [providerResolved, setProviderResolved] = useState(false)
   const [hidden, setHidden] = useState(false)
+  const [configOpen, setConfigOpen] = useState(false)
   const modelSlug = useValue(host.state.model)
 
-  // Load hidden state from storage on mount.
   useEffect(() => {
     try {
       const stored = storage?.get?.('hidden')
@@ -149,15 +278,24 @@ function UsageChip({ rest, storage }) {
     try { storage?.set?.('hidden', false) } catch { /* ok */ }
   }, [storage])
 
-  // Expose show() globally for the ⌘K command.
   useEffect(() => {
     window.__usageStatsShow = show
-    return () => { delete window.__usageStatsShow }
+    window.__usageStatsOpen = () => setConfigOpen(true)
+    return () => { delete window.__usageStatsShow; delete window.__usageStatsOpen }
   }, [show])
+
+  // Detect first-run: if no provider has a key configured, open the dialog once.
+  const [autoOpened, setAutoOpened] = useState(false)
+  useEffect(() => {
+    if (!autoOpened && summary && summary.apiKeyConfigured) {
+      const anyConfigured = Object.values(summary.apiKeyConfigured).some(Boolean)
+      if (!anyConfigured) setConfigOpen(true)
+      setAutoOpened(true)
+    }
+  }, [summary, autoOpened])
 
   if (hidden) return null
 
-  // --- build chip content ---
   let chipChildren
   if (fetchError && !summary) {
     chipChildren = [
@@ -196,24 +334,28 @@ function UsageChip({ rest, storage }) {
     children: chipChildren,
   })
 
-  return jsx(ContextMenu, {
+  return jsx('div', {
     children: [
-      jsx(ContextMenuTrigger, { key: 'trigger', children: chip }),
-      jsx(ContextMenuContent, {
-        key: 'menu',
+      jsx(ContextMenu, {
+        key: 'ctx',
         children: [
-          jsx(ContextMenuItem, {
-            key: 'refresh',
-            onSelect: () => void refresh(),
-            children: '↻ Aggiorna',
-          }),
-          jsx(ContextMenuSeparator, { key: 'sep' }),
-          jsx(ContextMenuItem, {
-            key: 'hide',
-            onSelect: hide,
-            children: '✕ Nascondi dalla status bar',
+          jsx(ContextMenuTrigger, { key: 'trigger', children: chip }),
+          jsx(ContextMenuContent, {
+            key: 'menu',
+            children: [
+              jsx(ContextMenuItem, { key: 'refresh', onSelect: () => void refresh(), children: '↻ Aggiorna' }),
+              jsx(ContextMenuItem, { key: 'config', onSelect: () => setConfigOpen(true), children: '⚙ Configura chiavi' }),
+              jsx(ContextMenuSeparator, { key: 'sep' }),
+              jsx(ContextMenuItem, { key: 'hide', onSelect: hide, children: '✕ Nascondi dalla status bar' }),
+            ],
           }),
         ],
+      }),
+      jsx(ConfigDialog, {
+        key: 'dialog',
+        open: configOpen,
+        onOpenChange: setConfigOpen,
+        configured: summary?.apiKeyConfigured,
       }),
     ],
   })
@@ -225,7 +367,6 @@ export default {
   description: 'Usage & balance for the active model’s provider (OC, OR, DS, KI, NV, Z, AB, AR).',
   defaultEnabled: false,
   register(ctx) {
-    // Status bar chip — right-click for context menu (Aggiorna / Nascondi).
     ctx.register({
       id: 'chip',
       area: 'statusBar.right',
@@ -233,18 +374,29 @@ export default {
       render: () => jsx(UsageChip, { rest: ctx.rest, storage: ctx.storage }),
     })
 
-    // ⌘K command to re-show the chip after hiding.
     ctx.register({
       id: 'show-command',
       area: PALETTE_AREA,
       data: {
         id: `${ID}.show`,
         label: 'Usage Stats: Mostra',
-        keywords: ['usage', 'stats', 'provider', 'balance', 'mostra', 'show'],
+        keywords: ['usage', 'stats', 'provider', 'balance', 'mostra', 'show', 'configura', 'chiavi'],
         run: () => {
           try { window.__usageStatsShow?.() } catch { /* ok */ }
           host.notify({ kind: 'info', message: 'Usage Stats chip ripristinato.' })
         },
+      },
+    })
+
+    // ⌘K command to open the key config dialog directly.
+    ctx.register({
+      id: 'config-command',
+      area: PALETTE_AREA,
+      data: {
+        id: `${ID}.config`,
+        label: 'Usage Stats: Configura chiavi',
+        keywords: ['usage', 'stats', 'provider', 'api key', 'configura', 'chiavi'],
+        run: () => { try { window.__usageStatsOpen?.() } catch { /* ok */ } },
       },
     })
   },
