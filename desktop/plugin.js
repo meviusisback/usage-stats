@@ -4,11 +4,14 @@
  * Shows usage/balance for ONLY the provider backing the currently-selected
  * model, and switches automatically when the model changes.
  *
- * Right-click the status bar → "Usage Stats" to show/hide the chip.
- * Click the chip to force a refresh.
+ * Right-click the chip: "Aggiorna" / "Nascondi".
+ * Re-show: ⌘K → "Usage Stats: Mostra".
  */
 import {
   Tip, cn, host, useValue,
+  ContextMenu, ContextMenuTrigger, ContextMenuContent,
+  ContextMenuItem, ContextMenuSeparator,
+  PALETTE_AREA,
 } from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
 import { useCallback, useEffect, useState } from 'react'
@@ -87,12 +90,21 @@ function renderProvider(provider) {
   return [jsx(ProviderBadge, { key: provider.id, provider })]
 }
 
-function UsageChip({ rest }) {
+function UsageChip({ rest, storage }) {
   const [summary, setSummary] = useState(null)
   const [fetchError, setFetchError] = useState(null)
   const [activeProvider, setActiveProvider] = useState(null)
   const [providerResolved, setProviderResolved] = useState(false)
+  const [hidden, setHidden] = useState(false)
   const modelSlug = useValue(host.state.model)
+
+  // Load hidden state from storage on mount.
+  useEffect(() => {
+    try {
+      const stored = storage?.get?.('hidden')
+      if (stored) setHidden(true)
+    } catch { /* storage unavailable */ }
+  }, [storage])
 
   const checkProvider = useCallback(async () => {
     try {
@@ -127,48 +139,83 @@ function UsageChip({ rest }) {
     return () => clearInterval(timer)
   }, [checkProvider, refresh])
 
+  const hide = useCallback(() => {
+    setHidden(true)
+    try { storage?.set?.('hidden', true) } catch { /* ok */ }
+  }, [storage])
+
+  const show = useCallback(() => {
+    setHidden(false)
+    try { storage?.set?.('hidden', false) } catch { /* ok */ }
+  }, [storage])
+
+  // Expose show() globally for the ⌘K command.
+  useEffect(() => {
+    window.__usageStatsShow = show
+    return () => { delete window.__usageStatsShow }
+  }, [show])
+
+  if (hidden) return null
+
+  // --- build chip content ---
+  let chipChildren
   if (fetchError && !summary) {
-    return jsx(Tip, {
-      label: `Usage — ${fetchError}`,
-      children: jsx('span', {
-        className: 'inline-flex h-full items-center px-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
-        children: 'US ⚠',
-      }),
-    })
-  }
-
-  if (!summary) {
-    return jsx('span', {
-      className: 'inline-flex h-full items-center px-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
-      children: 'US …',
-    })
-  }
-
-  const providers = Array.isArray(summary.providers) ? summary.providers : []
-  const active = providers.find((p) => p.id === activeProvider)
-
-  let badges
-  if (active) {
-    badges = renderProvider(active)
-  } else if (providerResolved) {
-    return null
+    chipChildren = [
+      jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
+      jsx('span', { key: 'err', className: 'text-[0.625rem] text-(--destructive)', children: '⚠' }),
+    ]
+  } else if (!summary) {
+    chipChildren = [
+      jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
+      jsx('span', { key: 'dots', className: 'text-[0.625rem] text-(--ui-text-quaternary)', children: '…' }),
+    ]
   } else {
-    badges = providers.flatMap((p, i) => {
-      const sep = i > 0
-        ? [jsx('span', { key: `sep-${p.id}`, className: 'text-(--ui-text-quaternary)', children: '·' })]
-        : []
-      return [...sep, ...renderProvider(p)]
-    })
+    const providers = Array.isArray(summary.providers) ? summary.providers : []
+    const active = providers.find((p) => p.id === activeProvider)
+    if (active) {
+      chipChildren = renderProvider(active)
+    } else if (providerResolved) {
+      return null
+    } else {
+      chipChildren = providers.flatMap((p, i) => {
+        const sep = i > 0
+          ? [jsx('span', { key: `sep-${p.id}`, className: 'text-(--ui-text-quaternary)', children: '·' })]
+          : []
+        return [...sep, ...renderProvider(p)]
+      })
+    }
   }
 
-  return jsx('button', {
+  const chip = jsx('button', {
     className: cn(
       'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] transition-colors',
       'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
     ),
     type: 'button',
     onClick: () => void refresh(),
-    children: badges,
+    children: chipChildren,
+  })
+
+  return jsx(ContextMenu, {
+    children: [
+      jsx(ContextMenuTrigger, { key: 'trigger', children: chip }),
+      jsx(ContextMenuContent, {
+        key: 'menu',
+        children: [
+          jsx(ContextMenuItem, {
+            key: 'refresh',
+            onSelect: () => void refresh(),
+            children: '↻ Aggiorna',
+          }),
+          jsx(ContextMenuSeparator, { key: 'sep' }),
+          jsx(ContextMenuItem, {
+            key: 'hide',
+            onSelect: hide,
+            children: '✕ Nascondi dalla status bar',
+          }),
+        ],
+      }),
+    ],
   })
 }
 
@@ -178,17 +225,26 @@ export default {
   description: 'Usage & balance for the active model’s provider (OC, OR, DS, KI, NV, Z, AB, AR).',
   defaultEnabled: false,
   register(ctx) {
-    // Register as a DATA contribution (not render:) so toggleLabel is respected.
-    // The status bar's right-click menu picks up toggleLabel and shows a
-    // checkbox to show/hide this chip — exactly what the user asked for.
+    // Status bar chip — right-click for context menu (Aggiorna / Nascondi).
     ctx.register({
       id: 'chip',
       area: 'statusBar.right',
       order: 200,
+      render: () => jsx(UsageChip, { rest: ctx.rest, storage: ctx.storage }),
+    })
+
+    // ⌘K command to re-show the chip after hiding.
+    ctx.register({
+      id: 'show-command',
+      area: PALETTE_AREA,
       data: {
-        id: 'chip',
-        render: () => jsx(UsageChip, { rest: ctx.rest }),
-        toggleLabel: 'Usage Stats',
+        id: `${ID}.show`,
+        label: 'Usage Stats: Mostra',
+        keywords: ['usage', 'stats', 'provider', 'balance', 'mostra', 'show'],
+        run: () => {
+          try { window.__usageStatsShow?.() } catch { /* ok */ }
+          host.notify({ kind: 'info', message: 'Usage Stats chip ripristinato.' })
+        },
       },
     })
   },
