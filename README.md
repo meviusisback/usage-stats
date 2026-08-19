@@ -55,15 +55,23 @@ configured providers instead of disappearing.
   automatically on model change (plus a 60s safety poll).
 - **OpenCode three-window split** — rolling (5h), weekly, monthly usage
   percentages with color thresholds (green / accent / red).
-- **Right-click menu** on the chip: `↻ Aggiorna` (force refresh) and
+- **Right-click menu** on the chip: `↻ Aggiorna` (force refresh),
+  `⚙ Configura chiavi` (open the key dialog), and
   `✕ Nascondi dalla status bar` (hide, persisted across restarts).
-- **⌘K command** — `Usage Stats: Mostra` re-shows the chip after hiding.
+- **⌘K commands** — `Usage Stats: Mostra` re-shows the chip after hiding,
+  `Usage Stats: Configura chiavi` opens the key dialog directly.
+- **Key config dialog** — on first run (no provider key configured) a popup
+  opens with masked `password` inputs for all 8 providers. Copying the entered
+  keys writes the formatted `KEY=VALUE` lines to the **local clipboard only**
+  (via `navigator.clipboard` / the Desktop clipboard bridge) — **never over the
+  network**. You then paste them into `~/.hermes/.env` yourself.
 - **Resilient error handling** — distinguishes missing API key, HTTP 403, and
   network errors in the tooltip; never blocks the status bar.
 - **Parallel fetch** — all providers are queried concurrently via a thread
   pool (no 45s sequential worst case).
 - **Secure** — the backend never returns API keys or upstream headers; it only
-  forwards sanitized usage numbers.
+  forwards sanitized usage numbers. The config dialog never transmits a key to
+  the backend; `/summary` returns only a boolean `apiKeyConfigured` map.
 
 ## Requirements
 
@@ -106,7 +114,10 @@ The plugin must physically exist under the same profile home, e.g.
 
 ## Configure the API keys
 
-Add the keys for the providers you use to the active profile's `.env`:
+You can configure keys two ways:
+
+1. **Manually** — add them to the active profile's `.env` (the backend reads
+   keys from the process environment at startup, populated by `~/.hermes/.env`):
 
 ```bash
 # ~/.hermes/.env  (or ~/.hermes/profiles/<name>/.env for a named profile)
@@ -119,6 +130,18 @@ ZAI_API_KEY=your-key-here
 DASHSCOPE_API_KEY=your-key-here
 ARCEE_API_KEY=your-key-here
 ```
+
+2. **Via the in-app dialog** — on first run (or via right-click chip →
+   `⚙ Configura chiavi`, or ⌘K → `Usage Stats: Configura chiavi`), enter the
+   keys in the masked inputs and click **Copia negli appunti**. The plugin
+   copies the `KEY=VALUE` lines to your **local clipboard only** (never over the
+   network); paste them into `~/.hermes/.env`. The dialog only auto-opens when
+   **no** provider key is configured — a single key (any provider) suppresses
+   it.
+
+> **Important:** keys are only picked up after the Hermes backend starts. If
+> you add a key to `.env` (or via the clipboard) while Hermes is running, fully
+> quit and reopen Hermes Desktop (⌘Q) so the backend reloads `.env`.
 
 The backend also accepts keys from its process environment.
 
@@ -178,6 +201,17 @@ The summary route (all providers) is:
 
 ```text
 GET /api/plugins/usage-stats/summary
+```
+
+It returns a `providers` array plus an `apiKeyConfigured` map of
+`{ provider_id: boolean }` — which keys the backend found in the environment
+(no key values are ever returned):
+
+```json
+{
+  "providers": [ { "id": "opencode", "display": "OC", "label": "40%", ... } ],
+  "apiKeyConfigured": { "opencode": true, "openrouter": false, "deepseek": true, ... }
+}
 ```
 
 A per-provider legacy route is also available at `/usage`.
