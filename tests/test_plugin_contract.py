@@ -28,7 +28,7 @@ def test_unified_desktop_plugin_is_the_only_desktop_source():
     assert not (ROOT / "desktop-plugins").exists()
 
     source = (ROOT / "desktop" / "plugin.js").read_text(encoding="utf-8")
-    assert "const ID = 'opencode-usage'" in source
+    assert "const ID = 'usage-stats'" in source
     assert "ctx.rest" in source
     assert "area: 'statusBar.right'" in source
     assert "render:" in source

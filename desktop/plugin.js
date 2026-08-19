@@ -1,21 +1,22 @@
 /**
- * OpenCode Usage — Hermes Desktop status-bar plugin (multi-provider, model-gated).
+ * Usage Stats — Hermes Desktop status-bar plugin (multi-provider, model-gated).
  *
  * Shows usage/balance for ONLY the provider backing the currently-selected
- * model, and switches automatically when the model changes:
- *   OpenCode Go → 5h / W / M windows (% used)
- *   OpenRouter   → remaining credit balance ($)
- *   DeepSeek     → remaining balance ($)
+ * model, and switches automatically when the model changes.
  *
- * The active provider is resolved from the gateway config
- * (`config.get full` → `config.model.provider`). If that RPC fails, the chip
- * degrades to showing ALL configured providers rather than disappearing.
+ * Right-click the chip to refresh or hide it.  Use ⌘K "Usage Stats: Mostra"
+ * to re-show after hiding.
  */
-import { Tip, cn, host, useValue } from '@hermes/plugin-sdk'
+import {
+  Tip, cn, host, useValue,
+  ContextMenu, ContextMenuTrigger, ContextMenuContent,
+  ContextMenuItem, ContextMenuSeparator,
+  PALETTE_AREA,
+} from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
 import { useCallback, useEffect, useState } from 'react'
 
-const ID = 'opencode-usage'
+const ID = 'usage-stats'
 const REFRESH_MS = 60_000
 
 function percentTone(value) {
@@ -32,7 +33,6 @@ function balanceTone(value) {
   return 'var(--ui-text-secondary)'
 }
 
-// Map a provider slug / base URL to a tracked plugin id (null = untracked).
 function providerIdFor(provider, baseUrl) {
   for (const value of [provider, baseUrl]) {
     if (!value) continue
@@ -76,7 +76,6 @@ function ProviderBadge({ provider }) {
   })
 }
 
-// Render one provider as an array of badge nodes (OC → windows, else single).
 function renderProvider(provider) {
   if (provider.id === 'opencode' && Array.isArray(provider.windows) && provider.windows.length > 0) {
     const badges = [
@@ -91,14 +90,22 @@ function renderProvider(provider) {
   return [jsx(ProviderBadge, { key: provider.id, provider })]
 }
 
-function UsageChip({ rest }) {
+function UsageChip({ rest, storage }) {
   const [summary, setSummary] = useState(null)
   const [fetchError, setFetchError] = useState(null)
   const [activeProvider, setActiveProvider] = useState(null)
   const [providerResolved, setProviderResolved] = useState(false)
+  const [hidden, setHidden] = useState(false)
   const modelSlug = useValue(host.state.model)
 
-  // Resolve the active model's provider from the gateway config.
+  // Load hidden state from storage on mount.
+  useEffect(() => {
+    try {
+      const stored = storage?.get?.('hidden')
+      if (stored) setHidden(true)
+    } catch { /* storage unavailable */ }
+  }, [storage])
+
   const checkProvider = useCallback(async () => {
     try {
       const res = await host.request('config.get', { key: 'full' })
@@ -123,82 +130,116 @@ function UsageChip({ rest }) {
     }
   }, [rest])
 
-  // Re-detect the active provider the instant the model slug changes.
-  useEffect(() => {
-    void checkProvider()
-  }, [checkProvider, modelSlug])
+  useEffect(() => { void checkProvider() }, [checkProvider, modelSlug])
 
-  // Periodic refresh + provider re-check.
   useEffect(() => {
     void checkProvider()
     void refresh()
-    const timer = setInterval(() => {
-      void checkProvider()
-      void refresh()
-    }, REFRESH_MS)
+    const timer = setInterval(() => { void checkProvider(); void refresh() }, REFRESH_MS)
     return () => clearInterval(timer)
   }, [checkProvider, refresh])
 
+  const hide = useCallback(() => {
+    setHidden(true)
+    try { storage?.set?.('hidden', true) } catch { /* ok */ }
+  }, [storage])
+
+  const show = useCallback(() => {
+    setHidden(false)
+    try { storage?.set?.('hidden', false) } catch { /* ok */ }
+  }, [storage])
+
+  // Expose show() globally for the ⌘K command.
+  useEffect(() => {
+    window.__usageStatsShow = show
+    return () => { delete window.__usageStatsShow }
+  }, [show])
+
+  if (hidden) return null
+
+  // --- build chip content ---
+  let chipChildren
   if (fetchError && !summary) {
-    return jsx(Tip, {
-      label: `Usage — ${fetchError}`,
-      children: jsx('span', {
-        className: 'inline-flex h-full items-center px-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
-        children: 'Usage ⚠',
-      }),
-    })
-  }
-
-  if (!summary) {
-    return jsx('span', {
-      className: 'inline-flex h-full items-center px-1.5 text-[0.6875rem] text-(--ui-text-quaternary)',
-      children: 'Usage …',
-    })
-  }
-
-  const providers = Array.isArray(summary.providers) ? summary.providers : []
-  if (providers.length === 0) return null
-
-  const active = providers.find((p) => p.id === activeProvider)
-
-  let badges
-  if (active) {
-    badges = renderProvider(active)
-  } else if (providerResolved) {
-    // Active model is from a provider we don't track → hide the chip.
-    return null
+    chipChildren = [jsx('span', { key: 'err', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
+      jsx('span', { key: 'msg', className: 'text-[0.625rem] text-(--destructive)', children: '⚠' })]
+  } else if (!summary) {
+    chipChildren = [jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
+      jsx('span', { key: 'dots', className: 'text-[0.625rem] text-(--ui-text-quaternary)', children: '…' })]
   } else {
-    // Provider resolution failed → show every configured provider instead.
-    badges = providers.flatMap((p, i) => {
-      const sep = i > 0
-        ? [jsx('span', { key: `sep-${p.id}`, className: 'text-(--ui-text-quaternary)', children: '·' })]
-        : []
-      return [...sep, ...renderProvider(p)]
-    })
+    const providers = Array.isArray(summary.providers) ? summary.providers : []
+    const active = providers.find((p) => p.id === activeProvider)
+    if (active) {
+      chipChildren = renderProvider(active)
+    } else if (providerResolved) {
+      return null
+    } else {
+      chipChildren = providers.flatMap((p, i) => {
+        const sep = i > 0 ? [jsx('span', { key: `sep-${p.id}`, className: 'text-(--ui-text-quaternary)', children: '·' })] : []
+        return [...sep, ...renderProvider(p)]
+      })
+    }
   }
 
-  return jsx('button', {
+  const chip = jsx('button', {
     className: cn(
       'inline-flex h-full items-center gap-1 px-1.5 text-[0.6875rem] transition-colors',
       'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
     ),
     type: 'button',
     onClick: () => void refresh(),
-    children: badges,
+    children: chipChildren,
+  })
+
+  return jsx(ContextMenu, {
+    children: [
+      jsx(ContextMenuTrigger, { key: 'trigger', children: chip }),
+      jsx(ContextMenuContent, {
+        key: 'menu',
+        children: [
+          jsx(ContextMenuItem, {
+            key: 'refresh',
+            onSelect: () => void refresh(),
+            children: '↻ Aggiorna',
+          }),
+          jsx(ContextMenuSeparator, { key: 'sep' }),
+          jsx(ContextMenuItem, {
+            key: 'hide',
+            onSelect: hide,
+            children: '✕ Nascondi dalla status bar',
+          }),
+        ],
+      }),
+    ],
   })
 }
 
 export default {
   id: ID,
-  name: 'Usage',
-  description: 'Usage & balance for the active model’s provider (OpenCode, OpenRouter, DeepSeek).',
+  name: 'Usage Stats',
+  description: 'Usage & balance for the active model’s provider (OC, OR, DS, KI, NV, Z, AB, AR).',
   defaultEnabled: false,
   register(ctx) {
+    // Status bar chip with right-click context menu.
     ctx.register({
       id: 'chip',
       area: 'statusBar.right',
       order: 200,
-      render: () => jsx(UsageChip, { rest: ctx.rest }),
+      render: () => jsx(UsageChip, { rest: ctx.rest, storage: ctx.storage }),
+    })
+
+    // ⌘K command to re-show the chip after hiding.
+    ctx.register({
+      id: 'show-command',
+      area: PALETTE_AREA,
+      data: {
+        id: `${ID}.show`,
+        label: 'Usage Stats: Mostra',
+        keywords: ['usage', 'stats', 'provider', 'balance', 'mostra', 'show'],
+        run: () => {
+          try { window.__usageStatsShow?.() } catch { /* ok */ }
+          host.notify({ kind: 'info', message: 'Usage Stats chip ripristinato.' })
+        },
+      },
     })
   },
 }
