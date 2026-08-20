@@ -31,7 +31,7 @@ PROVIDER_ENV_KEYS = [
 
 def make_client():
     app = FastAPI()
-    app.include_router(plugin_api.router, prefix="/api/plugins/opencode-usage")
+    app.include_router(plugin_api.router, prefix="/api/plugins/usage-stats")
     return TestClient(app)
 
 
@@ -46,7 +46,7 @@ def test_health_route_is_mounted_at_the_desktop_namespace(monkeypatch):
     clear_provider_keys(monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(ROOT / "tests" / "fixtures" / "empty-home"))
 
-    response = make_client().get("/api/plugins/opencode-usage/health")
+    response = make_client().get("/api/plugins/usage-stats/health")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -62,7 +62,7 @@ def test_health_lists_configured_providers(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
 
-    body = make_client().get("/api/plugins/opencode-usage/health").json()
+    body = make_client().get("/api/plugins/usage-stats/health").json()
 
     assert body["status"] == "ok"
     assert body["api_key_configured"] is False
@@ -73,7 +73,7 @@ def test_usage_without_key_returns_sanitized_plugin_payload(monkeypatch):
     clear_provider_keys(monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(ROOT / "tests" / "fixtures" / "empty-home"))
 
-    response = make_client().get("/api/plugins/opencode-usage/usage")
+    response = make_client().get("/api/plugins/usage-stats/usage")
 
     assert response.status_code == 200
     assert response.json() == {
@@ -97,7 +97,7 @@ def test_usage_normalizes_upstream_response(monkeypatch):
     monkeypatch.setattr(plugin_api, "_read_api_key", lambda: "test-key")
     monkeypatch.setattr(plugin_api, "_request_usage", lambda _key: upstream)
 
-    response = make_client().get("/api/plugins/opencode-usage/usage")
+    response = make_client().get("/api/plugins/usage-stats/usage")
 
     assert response.status_code == 200
     body = response.json()
@@ -160,7 +160,7 @@ def test_summary_returns_each_configured_provider(monkeypatch):
     monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", specs)
     monkeypatch.setattr(plugin_api, "_read_key", lambda env: "test-key")
 
-    response = make_client().get("/api/plugins/opencode-usage/summary")
+    response = make_client().get("/api/plugins/usage-stats/summary")
 
     assert response.status_code == 200
     providers = response.json()["providers"]
@@ -185,7 +185,7 @@ def test_summary_marks_provider_without_key(monkeypatch):
     monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", specs)
     monkeypatch.setattr(plugin_api, "_read_key", lambda env: None)
 
-    body = make_client().get("/api/plugins/opencode-usage/summary").json()
+    body = make_client().get("/api/plugins/usage-stats/summary").json()
 
     assert body["providers"][0]["error"] == "no-api-key"
     assert body["providers"][0]["label"] is None
@@ -201,7 +201,7 @@ def test_summary_exposes_api_key_configured_map(monkeypatch):
     monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", specs)
     monkeypatch.setattr(plugin_api, "_read_key", lambda env: "x" if env == "OPENCODE_GO_API_KEY" else None)
 
-    body = make_client().get("/api/plugins/opencode-usage/summary").json()
+    body = make_client().get("/api/plugins/usage-stats/summary").json()
 
     assert body["apiKeyConfigured"] == {"opencode": True, "openrouter": False}
 
@@ -214,7 +214,7 @@ def test_summary_api_key_configured_all_false_when_no_keys(monkeypatch):
     monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", specs)
     monkeypatch.setattr(plugin_api, "_read_key", lambda env: None)
 
-    body = make_client().get("/api/plugins/opencode-usage/summary").json()
+    body = make_client().get("/api/plugins/usage-stats/summary").json()
 
     assert body["apiKeyConfigured"] == {"opencode": False}
 
@@ -235,7 +235,7 @@ def test_summary_sanitizes_transport_errors(monkeypatch):
     monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", specs)
     monkeypatch.setattr(plugin_api, "_read_key", lambda env: "test-key")
 
-    body = make_client().get("/api/plugins/opencode-usage/summary").json()
+    body = make_client().get("/api/plugins/usage-stats/summary").json()
 
     assert body["providers"][0]["error"] == "http-403"
 
@@ -372,3 +372,23 @@ def test_all_providers_registered():
     assert "alibaba" in ids
     assert "arcee" in ids
     assert len(ids) == 8
+
+
+# --- _extract_balance: never infer balance from an arbitrary numeric field ---
+# Regression test for the security-review finding: a response like
+# {"code":0,"balance":12.5} must yield 12.5, NOT 0.0 (the old "first numeric
+# value" fallback returned 0.0, misreporting the real balance).
+def test_extract_balance_prefers_named_field_over_arbitrary_numeric():
+    body = {"code": 0, "msg": "ok", "balance": 12.5}
+    assert plugin_api._extract_balance(body, ("balance", "credits", "remaining")) == 12.5
+
+
+def test_extract_balance_returns_none_when_no_named_field():
+    # No named field present → must return None (not a stray numeric code/id).
+    body = {"code": 200, "request_id": "abc123", "msg": "ok"}
+    assert plugin_api._extract_balance(body, ("balance", "credits", "remaining")) is None
+
+
+def test_extract_balance_unwraps_data():
+    body = {"data": {"balance": 50.0}}
+    assert plugin_api._extract_balance(body, ("balance",), unwrap_data=True) == 50.0

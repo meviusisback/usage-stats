@@ -4,6 +4,18 @@
  * Shows usage/balance for ONLY the provider backing the currently-selected
  * model, and switches automatically when the model changes.
  *
+ * Two data sources, merged into one model-gated chip:
+ *
+ *  1. KEY-BASED providers (OpenCode, OpenRouter, DeepSeek, Kimi, NovitaAI,
+ *     ZAI, Alibaba, Arcee) — fetched by the Python backend via `rest('/summary')`.
+ *     These need an API key in ~/.hermes/.env.
+ *
+ *  2. GATEWAY-NATIVE providers (Claude/Anthropic, Codex, Cursor, Kimi,
+ *     OpenRouter, Nous) — read DIRECTLY from the gateway RPCs
+ *     `account.usage` / `usage.bars`. The gateway already holds their
+ *     credentials, so NO API key or backend is needed for these. This mirrors
+ *     the technique used by the resetwatch plugin.
+ *
  * Right-click the chip: "Aggiorna" / "Nascondi" / "Configura chiavi".
  * Re-show: ⌘K → "Usage Stats: Mostra".
  *
@@ -40,6 +52,18 @@ const KEY_SPECS = [
   { id: 'arcee', name: 'Arcee AI', autoKey: 'ARCEE_API_KEY', altKeys: [] },
 ]
 
+// Gateway-native provider slugs (from account.usage / config) → display info.
+// These are read without any API key (the gateway holds the credentials).
+const GATEWAY_PROVIDERS = {
+  anthropic: { display: 'CL', name: 'Claude' },
+  'openai-codex': { display: 'CX', name: 'Codex' },
+  codex: { display: 'CX', name: 'Codex' },
+  cursor: { display: 'CU', name: 'Cursor' },
+  kimi: { display: 'KI', name: 'Kimi' },
+  openrouter: { display: 'OR', name: 'OpenRouter' },
+  nous: { display: 'NO', name: 'Nous' },
+}
+
 function percentTone(value) {
   if (value == null) return 'var(--ui-text-quaternary)'
   if (value >= 90) return 'var(--destructive)'
@@ -54,6 +78,7 @@ function balanceTone(value) {
   return 'var(--ui-text-secondary)'
 }
 
+// Map a model config (provider slug + base_url) to a provider id the chip knows.
 function providerIdFor(provider, baseUrl) {
   for (const value of [provider, baseUrl]) {
     if (!value) continue
@@ -61,6 +86,11 @@ function providerIdFor(provider, baseUrl) {
     if (v.includes('opencode')) return 'opencode'
     if (v.includes('openrouter')) return 'openrouter'
     if (v.includes('deepseek')) return 'deepseek'
+    if (v.includes('kimi') || v.includes('moonshot')) return 'kimi'
+    if (v.includes('anthropic') || v.includes('claude')) return 'anthropic'
+    if (v.includes('codex')) return 'openai-codex'
+    if (v.includes('cursor')) return 'cursor'
+    if (v.includes('nous')) return 'nous'
   }
   return null
 }
@@ -111,12 +141,57 @@ function renderProvider(provider) {
   return [jsx(ProviderBadge, { key: provider.id, provider })]
 }
 
+// --- Gateway-native: read account.usage / usage.bars (no keys needed) --------
+function mapGatewayProviders(account, bars) {
+  const out = []
+  const snaps = (account && account.snapshots) || []
+  for (const snap of snaps) {
+    const slug = snap.provider
+    if (!slug) continue
+    const info = GATEWAY_PROVIDERS[String(slug).toLowerCase()]
+    if (!info) continue
+    const windows = (snap.windows || []).map((win) => ({
+      id: String(win.label || '').toLowerCase(),
+      label: win.label,
+      percent: typeof win.used_percent === 'number' ? win.used_percent : (typeof win.remaining_percent === 'number' ? 100 - win.remaining_percent : null),
+    }))
+    const first = windows[0]
+    out.push({
+      id: 'gw:' + slug,
+      gatewaySlug: slug,
+      name: info.name,
+      display: info.display,
+      kind: windows.length ? 'percent' : 'note',
+      label: first ? `${Math.round(first.percent)}%` : '—',
+      value: first ? first.percent : null,
+      detail: (snap.details || []).join(' · ') || `${info.name} usage`,
+      windows,
+      error: null,
+    })
+  }
+  if (bars && (bars.plan_bar || bars.topup_bar)) {
+    const rem = bars.plan_bar?.pct_used != null ? 100 - bars.plan_bar.pct_used : null
+    out.push({
+      id: 'gw:nous',
+      gatewaySlug: 'nous',
+      name: 'Nous Portal',
+      display: 'NO',
+      kind: 'percent',
+      label: rem != null ? `${Math.round(rem)}%` : '—',
+      value: rem,
+      detail: bars.subscription_remaining_display || 'Nous Portal credits',
+      windows: [],
+      error: null,
+    })
+  }
+  return out
+}
+
 // --- Config dialog: masked inputs → copy to local clipboard (NEVER network) ---
 function ConfigDialog({ open, onOpenChange, configured }) {
   const [values, setValues] = useState({})
   const [copied, setCopied] = useState(false)
 
-  // Seed the dialog with the env key names so the user knows what to paste where.
   const rows = useMemo(() => KEY_SPECS.map((spec) => ({
     ...spec,
     configured: configured ? !!configured[spec.id]?.configured : false,
@@ -221,6 +296,7 @@ function ConfigDialog({ open, onOpenChange, configured }) {
 
 function UsageChip({ rest, storage }) {
   const [summary, setSummary] = useState(null)
+  const [gatewayProviders, setGatewayProviders] = useState([])
   const [fetchError, setFetchError] = useState(null)
   const [activeProvider, setActiveProvider] = useState(null)
   const [providerResolved, setProviderResolved] = useState(false)
@@ -251,11 +327,23 @@ function UsageChip({ rest, storage }) {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await rest('/summary', { method: 'GET', timeoutMs: 20_000 })
-      setSummary(response)
-      setFetchError(null)
+      if (rest) {
+        const response = await rest('/summary', { method: 'GET', timeoutMs: 20_000 })
+        setSummary(response)
+        setFetchError(null)
+      }
     } catch (error) {
       setFetchError(error instanceof Error ? error.message : String(error))
+    }
+    // Gateway-native providers — no backend, no keys.
+    try {
+      const [acc, bars] = await Promise.all([
+        host.request('account.usage', {}).catch(() => null),
+        host.request('usage.bars', {}).catch(() => null),
+      ])
+      setGatewayProviders(mapGatewayProviders(acc, bars))
+    } catch {
+      /* gateway-native data unavailable; key-based providers still work */
     }
   }, [rest])
 
@@ -284,7 +372,6 @@ function UsageChip({ rest, storage }) {
     return () => { delete window.__usageStatsShow; delete window.__usageStatsOpen }
   }, [show])
 
-  // Detect first-run: if no provider has a key configured, open the dialog once.
   const [autoOpened, setAutoOpened] = useState(false)
   useEffect(() => {
     if (!autoOpened && summary && summary.apiKeyConfigured) {
@@ -296,26 +383,32 @@ function UsageChip({ rest, storage }) {
 
   if (hidden) return null
 
+  // Merge key-based + gateway-native providers for display.
+  const keyProviders = Array.isArray(summary?.providers) ? summary.providers : []
+  const allProviders = [...keyProviders, ...gatewayProviders]
+
   let chipChildren
-  if (fetchError && !summary) {
+  if (fetchError && !summary && !gatewayProviders.length) {
     chipChildren = [
       jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
       jsx('span', { key: 'err', className: 'text-[0.625rem] text-(--destructive)', children: '⚠' }),
     ]
-  } else if (!summary) {
+  } else if (!allProviders.length) {
     chipChildren = [
       jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
       jsx('span', { key: 'dots', className: 'text-[0.625rem] text-(--ui-text-quaternary)', children: '…' }),
     ]
   } else {
-    const providers = Array.isArray(summary.providers) ? summary.providers : []
-    const active = providers.find((p) => p.id === activeProvider)
+    // Prefer the active gateway-native provider when model-gated.
+    const active = allProviders.find(
+      (p) => p.gatewaySlug && providerIdFor(p.gatewaySlug, '') === activeProvider,
+    ) || allProviders.find((p) => p.id === activeProvider)
     if (active) {
       chipChildren = renderProvider(active)
     } else if (providerResolved) {
       return null
     } else {
-      chipChildren = providers.flatMap((p, i) => {
+      chipChildren = allProviders.flatMap((p, i) => {
         const sep = i > 0
           ? [jsx('span', { key: `sep-${p.id}`, className: 'text-(--ui-text-quaternary)', children: '·' })]
           : []
@@ -364,7 +457,7 @@ function UsageChip({ rest, storage }) {
 export default {
   id: ID,
   name: 'Usage Stats',
-  description: 'Usage & balance for the active model’s provider (OC, OR, DS, KI, NV, Z, AB, AR).',
+  description: 'Usage & balance for the active model’s provider (OC, OR, DS, KI, NV, Z, AB, AR, + gateway-native Claude/Codex/Cursor/Nous).',
   defaultEnabled: false,
   register(ctx) {
     ctx.register({

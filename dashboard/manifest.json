@@ -1,11 +1,11 @@
 {
-  "name": "opencode-usage",
-  "label": "OpenCode Usage",
-  "description": "Backend API for the OpenCode Go desktop usage chip.",
+  "name": "usage-stats",
+  "label": "Usage Stats",
+  "description": "Backend API for the multi-provider usage/balance desktop chip (OpenCode, OpenRouter, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, plus gateway-native Claude/Codex/Cursor/Nous).",
   "icon": "Activity",
-  "version": "1.0.2",
+  "version": "2.1.0",
   "tab": {
-    "path": "/opencode-usage",
+    "path": "/usage-stats",
     "hidden": true
   },
   "entry": "dist/index.js",

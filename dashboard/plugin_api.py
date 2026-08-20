@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -53,6 +54,10 @@ WINDOWS = [
     {"id": "weekly", "label": "W"},
     {"id": "monthly", "label": "M"},
 ]
+
+# In-memory cache for /summary to limit upstream load and abuse (finding #6).
+_SUMMARY_CACHE_TTL_SECONDS = 45
+_summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _read_key(env_name: str) -> str | None:
@@ -152,17 +157,15 @@ def _extract_balance(
 ) -> float | None:
     """Find a numeric balance value in a response dict.
 
-    Tries ``field_names`` in order, then falls back to the first numeric
-    top-level value.  Returns ``None`` if nothing found.
+    Tries ``field_names`` (and ``data.<field>`` when ``unwrap_data``) in order.
+    Returns ``None`` if no named field matches — never infers a balance from an
+    arbitrary numeric field (e.g. ``code`` / ``request_id``), which would show a
+    wrong balance to the user.  The caller maps ``None`` to an error payload.
     """
     inner = body.get("data") if unwrap_data and isinstance(body.get("data"), dict) else body
     for key in field_names:
         if key in inner:
             return _safe_float(inner[key])
-    # Fallback: first numeric value
-    for val in inner.values():
-        if isinstance(val, (int, float)):
-            return float(val)
     return None
 
 
@@ -454,8 +457,15 @@ def usage() -> dict[str, Any]:
 
 @router.get("/summary")
 def summary() -> dict[str, Any]:
-    """Usage/balance for every configured provider, fetched in parallel."""
-    providers: list[dict[str, Any]] = [None] * len(PROVIDER_SPECS)  # type: ignore[list-item]
+    """Usage/balance for every configured provider, fetched in parallel.
+
+    Results are cached in-memory for ``_SUMMARY_CACHE_TTL_SECONDS`` to avoid
+    re-hitting every upstream provider on each poll and to limit abuse.
+    """
+    now = time.monotonic()
+    cached = _summary_cache.get("summary")
+    if cached is not None and (now - cached[0]) < _SUMMARY_CACHE_TTL_SECONDS:
+        return cached[1]
 
     def _fetch_one(spec: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         entry: dict[str, Any] = {
@@ -498,10 +508,12 @@ def summary() -> dict[str, Any]:
             idx = futures[future]
             providers[idx] = future.result()
 
-    return {
+    result: dict[str, Any] = {
         "providers": providers,
         "apiKeyConfigured": {
             spec["id"]: any(_read_key(env) for env in spec["key_envs"])
             for spec in PROVIDER_SPECS
         },
     }
+    _summary_cache["summary"] = (time.monotonic(), result)
+    return result

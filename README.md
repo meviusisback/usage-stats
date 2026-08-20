@@ -44,10 +44,23 @@ It contains two coordinated halves:
 > Vertex, Azure, CommandCode (proxy UI billing only), and all OAuth/local
 > providers. These return `null` in the chip but never crash it.
 
-The active provider is resolved from the **full Hermes config** (`config.get
-full` → `model.provider`), not from a fragile RPC that returns only a string
-slug. If resolution fails, the chip degrades gracefully by showing **all**
-configured providers instead of disappearing.
+## How it works (hybrid design)
+
+The chip merges **two** data sources so you see every provider you actually use:
+
+| Source | Providers | Needs a key? | Mechanism |
+|--------|-----------|--------------|-----------|
+| **Key-based** (Python backend) | OpenCode Go/Zen, OpenRouter, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee | ✅ yes (`.env`) | `rest('/summary')` → backend calls each vendor API |
+| **Gateway-native** (no backend) | Claude/Anthropic, Codex, Cursor, Kimi, OpenRouter, Nous | ❌ no | reads `account.usage` / `usage.bars` RPCs directly |
+
+The gateway already holds credentials for the second group (OAuth tokens, cred
+pools), so their usage shows with **no configuration at all**. Only the
+key-based group requires adding API keys to `~/.hermes/.env`.
+
+The chip is **model-gated**: it shows only the provider of the active model and
+switches automatically when you change models. If the active provider is not
+supported, the chip hides itself (unless resolution failed, in which case it
+shows all configured providers).
 
 ## Features
 
