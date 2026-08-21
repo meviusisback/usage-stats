@@ -20,8 +20,8 @@ const start = src.indexOf('// Map a model config')
 const end = src.indexOf('function WindowBadge')
 assert.ok(start > 0 && end > start, 'pure-function slice markers not found')
 
-const factory = new Function(`${src.slice(start, end)}\nreturn { providerIdFor, resetCountdown }`)
-const { providerIdFor, resetCountdown } = factory()
+const factory = new Function(`${src.slice(start, end)}\nreturn { providerIdFor, resetCountdown, widgetProviders }`)
+const { providerIdFor, resetCountdown, widgetProviders } = factory()
 
 const minutesFromNow = (m) => new Date(Date.now() + m * 60_000).toISOString()
 
@@ -75,4 +75,23 @@ test('resetCountdown handles past, missing, malformed, far-future', () => {
   assert.equal(resetCountdown('not-a-date'), null)
   // Sentinel timestamps must not render '(2927702d)'.
   assert.equal(resetCountdown('9999-12-31T00:00:00Z'), null)
+})
+
+test('widgetProviders lists only providers with data', () => {
+  const all = [
+    { id: 'opencode', display: 'OC', kind: 'percent', label: '38%', error: null },
+    { id: 'deepseek', display: 'DS', kind: null, label: null, error: 'no-api-key' },
+    { id: 'openrouter', display: 'OR', kind: 'balance', label: '$1.82', error: 'http-403' },
+    { id: 'gw:kimi', gatewaySlug: 'kimi', kind: 'percent', label: '12%', error: null },
+    { id: 'gw:nous', gatewaySlug: 'nous', kind: 'note', label: '—', error: null },
+  ]
+  const listed = widgetProviders(all)
+  // Unconfigured key-based entries and empty gateway notes never show;
+  // a configured key with a failed fetch still shows (with its error).
+  assert.deepEqual(listed.map((p) => p.id), ['opencode', 'openrouter', 'gw:kimi'])
+})
+
+test('widgetProviders tolerates missing payload', () => {
+  assert.deepEqual(widgetProviders(undefined), [])
+  assert.deepEqual(widgetProviders(null), [])
 })

@@ -31,6 +31,7 @@ import {
   ContextMenuItem, ContextMenuSeparator,
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
   Input,
+  Popover, PopoverContent, PopoverTrigger,
   PALETTE_AREA,
 } from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
@@ -133,6 +134,15 @@ function resetCountdown(resetsAt) {
   return `${days}d`
 }
 
+// Providers worth listing in the click-widget: everything that reports real
+// data — key-based entries whose key is configured (anything else carries
+// error 'no-api-key') plus gateway-native entries with actual windows. The
+// user asked for configured providers ONLY; unconfigured ones never show.
+function widgetProviders(allProviders) {
+  return (Array.isArray(allProviders) ? allProviders : []).filter((p) =>
+    p.error !== 'no-api-key' && !(p.gatewaySlug && p.kind === 'note'))
+}
+
 function WindowBadge({ w }) {
   const text = w.percent == null ? '—' : `${Math.round(w.percent)}%`
   const reset = resetCountdown(w.resetsAt)
@@ -182,6 +192,44 @@ function renderProvider(provider) {
     return badges
   }
   return [jsx(ProviderBadge, { key: provider.id, provider })]
+}
+
+// One row of the click-widget: display id + name on the left, measure (or
+// sanitized error) on the right. `active` highlights the provider whose
+// model is currently selected in the composer.
+function WidgetRow({ p, active }) {
+  const value = p.error
+    ? jsx('span', {
+        key: 'v',
+        className: 'font-mono text-[0.625rem] text-(--destructive)',
+        children: `⚠ ${p.error}`,
+      })
+    : jsx('span', {
+        key: 'v',
+        className: 'font-mono text-[0.6875rem]',
+        style: { color: p.kind === 'balance' ? balanceTone(p.value) : percentTone(p.value) },
+        children: p.label ?? '—',
+      })
+  return jsx(Tip, {
+    label: p.error ? `${p.name} — ${p.error}` : (p.detail || `${p.name}: ${p.label}`),
+    children: jsx('div', {
+      className: cn(
+        'flex items-center justify-between gap-3 rounded-md px-1.5 py-1',
+        active && 'bg-(--chrome-action-hover)',
+      ),
+      children: [
+        jsx('span', {
+          key: 'n',
+          className: 'whitespace-nowrap text-[0.625rem]',
+          children: [
+            jsx('span', { key: 'd', className: 'font-mono text-(--ui-text-quaternary)', children: p.display }),
+            jsx('span', { key: 's', className: 'text-(--ui-text-secondary)', children: ` ${p.name}` }),
+          ],
+        }),
+        value,
+      ],
+    }),
+  })
 }
 
 // --- Gateway-native: read account.usage / usage.bars (no keys needed) --------
@@ -354,6 +402,7 @@ function UsageChip({ rest, storage }) {
   const [providerResolved, setProviderResolved] = useState(false)
   const [hidden, setHidden] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
+  const [panelOpen, setPanelOpen] = useState(false)
   const modelSlug = useValue(host.state.model)
 
   useEffect(() => {
@@ -441,41 +490,66 @@ function UsageChip({ rest, storage }) {
     }
   }, [summary, autoOpened])
 
-  if (hidden) return null
-
   // Merge key-based + gateway-native providers for display.
   const keyProviders = Array.isArray(summary?.providers) ? summary.providers : []
   const allProviders = [...keyProviders, ...gatewayProviders]
 
+  // The provider whose model is currently selected in the composer.
+  const active = allProviders.find(
+    (p) => p.gatewaySlug && p.kind !== 'note' && providerIdFor(p.gatewaySlug, '') === activeProvider,
+  ) || allProviders.find((p) => p.id === activeProvider)
+
   let chipChildren
-  if (fetchError && !summary && !gatewayProviders.length) {
-    chipChildren = [
-      jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
-      jsx('span', { key: 'err', className: 'text-[0.625rem] text-(--destructive)', children: '⚠' }),
-    ]
-  } else if (!allProviders.length) {
+  if (!providerResolved) {
+    // Model gate still resolving — brief placeholder, never a provider list.
     chipChildren = [
       jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
       jsx('span', { key: 'dots', className: 'text-[0.625rem] text-(--ui-text-quaternary)', children: '…' }),
     ]
+  } else if (active) {
+    // STRICT model gating: only the active model's provider on the chip.
+    chipChildren = renderProvider(active)
+  } else if (fetchError && !summary && !gatewayProviders.length) {
+    // Supported provider but its data can't load at all — surface the fault
+    // instead of silently hiding a chip the user enabled.
+    chipChildren = [
+      jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
+      jsx('span', { key: 'err', className: 'text-[0.625rem] text-(--destructive)', children: '⚠' }),
+    ]
   } else {
-    // Prefer the active gateway-native provider when model-gated.
-    const active = allProviders.find(
-      (p) => p.gatewaySlug && p.kind !== 'note' && providerIdFor(p.gatewaySlug, '') === activeProvider,
-    ) || allProviders.find((p) => p.id === activeProvider)
-    if (active) {
-      chipChildren = renderProvider(active)
-    } else if (providerResolved) {
-      return null
-    } else {
-      chipChildren = allProviders.flatMap((p, i) => {
-        const sep = i > 0
-          ? [jsx('span', { key: `sep-${p.id}`, className: 'text-(--ui-text-quaternary)', children: '·' })]
-          : []
-        return [...sep, ...renderProvider(p)]
-      })
-    }
+    // Unsupported/unconfigured active provider — hide by design.
+    return null
   }
+
+  const listed = widgetProviders(allProviders)
+  const panel = jsx(PopoverContent, {
+    key: 'panel',
+    align: 'end',
+    sideOffset: 6,
+    className: 'w-64 p-1.5',
+    children: [
+      jsx('div', {
+        key: 'head',
+        className: 'px-1.5 pb-1 pt-0.5 text-[0.625rem] font-semibold text-(--ui-text-quaternary)',
+        children: 'Uso — provider configurati',
+      }),
+      listed.length === 0
+        ? jsx('div', {
+            key: 'empty',
+            className: 'px-1.5 py-2 text-[0.625rem] text-(--ui-text-tertiary)',
+            children: 'Nessuna chiave configurata — clic destro → Configura chiavi',
+          })
+        : jsx('div', {
+            key: 'rows',
+            className: 'flex flex-col gap-0.5',
+            children: listed.map((p) => jsx(WidgetRow, {
+              key: p.id,
+              p,
+              active: p === active || (activeProvider != null && p.gatewaySlug && providerIdFor(p.gatewaySlug, '') === activeProvider),
+            })),
+          }),
+    ],
+  })
 
   const chip = jsx('button', {
     className: cn(
@@ -492,7 +566,19 @@ function UsageChip({ rest, storage }) {
       jsx(ContextMenu, {
         key: 'ctx',
         children: [
-          jsx(ContextMenuTrigger, { key: 'trigger', children: chip }),
+          jsx(ContextMenuTrigger, {
+            key: 'trigger',
+            asChild: true,
+            children: jsx(Popover, {
+              key: 'pop',
+              open: panelOpen,
+              onOpenChange: setPanelOpen,
+              children: [
+                jsx(PopoverTrigger, { key: 'pt', asChild: true, children: chip }),
+                panel,
+              ],
+            }),
+          }),
           jsx(ContextMenuContent, {
             key: 'menu',
             children: [

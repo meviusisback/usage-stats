@@ -58,15 +58,24 @@ The gateway already holds credentials for the second group (OAuth tokens, cred
 pools), so their usage shows with **no configuration at all**. Only the
 key-based group requires adding API keys to `~/.hermes/.env`.
 
-The chip is **model-gated**: it shows only the provider of the active model and
-switches automatically when you change models. If the active provider is not
-supported, the chip hides itself (unless resolution failed, in which case it
-shows all configured providers).
+The chip is **strictly model-gated**: it shows ONLY the provider of the active
+model and switches automatically when you change models. If the active model
+runs on an unsupported/unconfigured provider, the chip hides itself — it never
+shows a list of unrelated providers.
+
+**Left-click the chip** for the overview: a small popover listing every
+provider that actually reports data (key configured in `.env`, or
+gateway-native). Providers without a configured key are never shown. The
+active model's provider row is highlighted.
 
 ## Features
 
-- **Model-gated display** — shows only the active model's provider, switches
-  automatically on model change (plus a 60s safety poll).
+- **Model-gated display** — the chip shows only the active model's provider,
+  switches automatically on model change (60s safety poll). Unsupported
+  provider → chip hidden.
+- **Click widget** — left-click opens a small popover with every provider
+  that has data (configured key or gateway-native); unconfigured ones are
+  omitted. Active provider highlighted; hover a row for details.
 - **OpenCode three-window split** — rolling (5h), weekly, monthly usage
   percentages with color thresholds (green / accent / red).
 - **Reset countdowns per window** — each OpenCode window shows its
