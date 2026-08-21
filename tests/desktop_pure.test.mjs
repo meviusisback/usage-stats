@@ -20,8 +20,8 @@ const start = src.indexOf('// Map a model config')
 const end = src.indexOf('function WindowBadge')
 assert.ok(start > 0 && end > start, 'pure-function slice markers not found')
 
-const factory = new Function(`${src.slice(start, end)}\nreturn { providerIdFor, resetCountdown, widgetProviders }`)
-const { providerIdFor, resetCountdown, widgetProviders } = factory()
+const factory = new Function(`${src.slice(start, end)}\nreturn { providerIdFor, resetCountdown, widgetProviders, windowParts }`)
+const { providerIdFor, resetCountdown, widgetProviders, windowParts } = factory()
 
 const minutesFromNow = (m) => new Date(Date.now() + m * 60_000).toISOString()
 
@@ -75,6 +75,25 @@ test('resetCountdown handles past, missing, malformed, far-future', () => {
   assert.equal(resetCountdown('not-a-date'), null)
   // Sentinel timestamps must not render '(2927702d)'.
   assert.equal(resetCountdown('9999-12-31T00:00:00Z'), null)
+})
+
+test('windowParts exposes every window with rounded percent', () => {
+  const parts = windowParts([
+    { id: 'rolling', label: '5h', percent: 0 },
+    { id: 'weekly', label: 'W', percent: 78.6 },
+    { id: 'monthly', label: 'M', percent: null },
+  ])
+  assert.deepEqual(parts, [
+    { id: 'rolling', label: '5h', percent: 0, text: '0%' },
+    { id: 'weekly', label: 'W', percent: 78.6, text: '79%' },
+    { id: 'monthly', label: 'M', percent: null, text: '—' },
+  ])
+})
+
+test('windowParts returns null without windows', () => {
+  assert.equal(windowParts([]), null)
+  assert.equal(windowParts(undefined), null)
+  // Balance providers carry no windows — single-label rendering applies.
 })
 
 test('widgetProviders lists only providers with data', () => {

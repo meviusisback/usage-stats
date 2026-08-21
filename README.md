@@ -75,7 +75,10 @@ active model's provider row is highlighted.
   provider → chip hidden.
 - **Click widget** — left-click opens a small popover with every provider
   that has data (configured key or gateway-native); unconfigured ones are
-  omitted. Active provider highlighted; hover a row for details.
+  omitted. Active provider highlighted; hover a row for details. Windowed
+  providers (OpenCode) show ALL their windows in the row — `5h 0% · W 79% ·
+  M 46%` — not a single headline, so a quiet rolling window never hides
+  busy weekly/monthly usage.
 - **OpenCode three-window split** — rolling (5h), weekly, monthly usage
   percentages with color thresholds (green / accent / red).
 - **Reset countdowns per window** — each OpenCode window shows its
@@ -83,11 +86,11 @@ active model's provider row is highlighted.
   days beyond (`now` once the timestamp passes). The hover tooltip spells it
   out ("resets in 2d"). Computed at render time and refreshed on every poll,
   so it never goes stale. Windows without a usable `resetsAt` simply omit it.
-- **Right-click menu** on the chip: `↻ Aggiorna` (force refresh),
-  `⚙ Configura chiavi` (open the key dialog), and
-  `✕ Nascondi dalla status bar` (hide, persisted across restarts).
-- **⌘K commands** — `Usage Stats: Mostra` re-shows the chip after hiding,
-  `Usage Stats: Configura chiavi` opens the key dialog directly.
+- **Right-click menu** on the chip: `↻ Refresh` (force refresh),
+  `⚙ Configure keys` (open the key dialog), and
+  `✕ Hide from status bar` (hide, persisted across restarts).
+- **⌘K commands** — `Usage Stats: Show` re-shows the chip after hiding,
+  `Usage Stats: Configure keys` opens the key dialog directly.
 - **Key config dialog** — on first run (no provider key configured) a popup
   opens with masked `password` inputs for all 8 providers. Copying the entered
   keys writes the formatted `KEY=VALUE` lines to the **local clipboard only**
@@ -160,8 +163,8 @@ ARCEE_API_KEY=your-key-here
 ```
 
 2. **Via the in-app dialog** — on first run (or via right-click chip →
-   `⚙ Configura chiavi`, or ⌘K → `Usage Stats: Configura chiavi`), enter the
-   keys in the masked inputs and click **Copia negli appunti**. The plugin
+   `⚙ Configure keys`, or ⌘K → `Usage Stats: Configure keys`), enter the
+   keys in the masked inputs and click **Copy to clipboard**. The plugin
    copies the `KEY=VALUE` lines to your **local clipboard only** (never over the
    network); paste them into `~/.hermes/.env`. The dialog only auto-opens when
    **no** provider key is configured — a single key (any provider) suppresses

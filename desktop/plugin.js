@@ -16,11 +16,10 @@
  *     credentials, so NO API key or backend is needed for these. This mirrors
  *     the technique used by the resetwatch plugin.
  *
- * Right-click the chip: "Aggiorna" / "Nascondi" / "Configura chiavi".
- * Re-show: ⌘K → "Usage Stats: Mostra".
+ * Right-click the chip: "Refresh" / "Hide" / "Configure keys".
+ * Re-show: ⌘K → "Usage Stats: Show".
  *
- * SECURITY: API keys are NEVER transmitted over the network by this plugin.
- * The "Configura chiavi" dialog collects them in masked password inputs and
+ * The "Configure keys" dialog collects them in masked password inputs and
  * copies the formatted `KEY=VALUE` lines to the local clipboard (or the
  * Desktop's native clipboard bridge) — the user pastes them into ~/.hermes/.env
  * themselves. No key ever leaves the local machine via a plugin request.
@@ -134,6 +133,19 @@ function resetCountdown(resetsAt) {
   return `${days}d`
 }
 
+// Per-window value parts for the widget row: OpenCode's headline is the
+// rolling window, which is often 0% while weekly/monthly are the interesting
+// ones — so rows show every window instead of one overall number.
+function windowParts(windows) {
+  if (!Array.isArray(windows) || windows.length === 0) return null
+  return windows.map((w) => ({
+    id: w.id,
+    label: w.label,
+    percent: typeof w.percent === 'number' ? w.percent : null,
+    text: w.percent == null ? '—' : `${Math.round(w.percent)}%`,
+  }))
+}
+
 // Providers worth listing in the click-widget: everything that reports real
 // data — key-based entries whose key is configured (anything else carries
 // error 'no-api-key') plus gateway-native entries with actual windows. The
@@ -198,18 +210,32 @@ function renderProvider(provider) {
 // sanitized error) on the right. `active` highlights the provider whose
 // model is currently selected in the composer.
 function WidgetRow({ p, active }) {
+  const parts = windowParts(p.windows)
   const value = p.error
     ? jsx('span', {
         key: 'v',
         className: 'font-mono text-[0.625rem] text-(--destructive)',
         children: `⚠ ${p.error}`,
       })
-    : jsx('span', {
-        key: 'v',
-        className: 'font-mono text-[0.6875rem]',
-        style: { color: p.kind === 'balance' ? balanceTone(p.value) : percentTone(p.value) },
-        children: p.label ?? '—',
-      })
+    : parts
+      ? jsx('span', {
+          key: 'v',
+          className: 'flex items-center gap-1 font-mono text-[0.6875rem]',
+          children: parts.flatMap((part, i) => {
+            const item = [
+              jsx('span', { key: part.id, className: 'inline-flex items-center gap-0.5', children: [
+                jsx('span', { className: 'text-(--ui-text-quaternary)', children: part.label }),
+                jsx('span', { style: { color: percentTone(part.percent) }, children: part.text }),
+              ] }),
+            return i === 0 ? item : [jsx('span', { key: `sep-${part.id}`, className: 'text-(--ui-text-quaternary)', children: '·' }), ...item]
+          }),
+        })
+      : jsx('span', {
+          key: 'v',
+          className: 'font-mono text-[0.6875rem]',
+          style: { color: p.kind === 'balance' ? balanceTone(p.value) : percentTone(p.value) },
+          children: p.label ?? '—',
+        })
   return jsx(Tip, {
     label: p.error ? `${p.name} — ${p.error}` : (p.detail || `${p.name}: ${p.label}`),
     children: jsx('div', {
@@ -333,10 +359,10 @@ function ConfigDialog({ open, onOpenChange, configured }) {
         jsx(DialogHeader, {
           key: 'h',
           children: [
-            jsx(DialogTitle, { key: 't', children: 'Configura chiavi provider' }),
+            jsx(DialogTitle, { key: 't', children: 'Configure provider keys' }),
             jsx(DialogDescription, {
               key: 'd',
-              children: 'Le chiavi sono mascherate e copiate solo negli appunti locali — non transitano mai sulla rete. Incolla poi il testo in ~/.hermes/.env',
+              children: 'Keys are masked and copied to the local clipboard only — they never travel over the network. Then paste the text into ~/.hermes/.env',
             }),
           ],
         }),
@@ -351,7 +377,7 @@ function ConfigDialog({ open, onOpenChange, configured }) {
                 className: 'text-[0.7rem] text-(--ui-text-secondary) flex items-center gap-1',
                 children: [
                   row.name,
-                  row.configured ? jsx('span', { key: 'ok', className: 'text-(--ui-text-quaternary)', children: '(già configurata)' }) : null,
+                  row.configured ? jsx('span', { key: 'ok', className: 'text-(--ui-text-quaternary)', children: '(configured)' }) : null,
                 ],
               }),
               jsx(Input, {
@@ -378,14 +404,13 @@ function ConfigDialog({ open, onOpenChange, configured }) {
                 'bg-(--chrome-action) text-(--chrome-action-fg) hover:opacity-90',
               ),
               onClick: () => void copyAll(),
-              children: copied ? 'Copiato! ✓' : 'Copia negli appunti',
-              disabled: KEY_SPECS.every((s) => !values[s.autoKey]),
+              children: copied ? 'Copied! ✓' : 'Copy to clipboard',
             }),
             jsx('button', {
               type: 'button',
               className: 'inline-flex items-center gap-1 rounded-md px-3 py-1.5 text-[0.75rem] text-(--ui-text-secondary) hover:bg-accent',
               onClick: () => onOpenChange(false),
-              children: 'Chiudi',
+              children: 'Close',
             }),
           ],
         }),
@@ -427,7 +452,7 @@ function UsageChip({ rest, storage }) {
   }, [])
 
   // Monotonic token: a slow/stalled refresh must never overwrite fresher
-  // state written by a later tick or a manual 'Aggiorna' click.
+  // state written by a later tick or a manual 'Refresh' click.
   const refreshSeq = useRef(0)
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current
@@ -521,23 +546,21 @@ function UsageChip({ rest, storage }) {
     return null
   }
 
-  const listed = widgetProviders(allProviders)
   const panel = jsx(PopoverContent, {
     key: 'panel',
     align: 'end',
     sideOffset: 6,
     className: 'w-64 p-1.5',
-    children: [
       jsx('div', {
         key: 'head',
         className: 'px-1.5 pb-1 pt-0.5 text-[0.625rem] font-semibold text-(--ui-text-quaternary)',
-        children: 'Uso — provider configurati',
+        children: 'Usage — configured providers',
       }),
       listed.length === 0
         ? jsx('div', {
             key: 'empty',
             className: 'px-1.5 py-2 text-[0.625rem] text-(--ui-text-tertiary)',
-            children: 'Nessuna chiave configurata — clic destro → Configura chiavi',
+            children: 'No keys configured — right-click → Configure keys',
           })
         : jsx('div', {
             key: 'rows',
@@ -572,7 +595,6 @@ function UsageChip({ rest, storage }) {
             children: jsx(Popover, {
               key: 'pop',
               open: panelOpen,
-              onOpenChange: setPanelOpen,
               children: [
                 jsx(PopoverTrigger, { key: 'pt', asChild: true, children: chip }),
                 panel,
@@ -582,10 +604,10 @@ function UsageChip({ rest, storage }) {
           jsx(ContextMenuContent, {
             key: 'menu',
             children: [
-              jsx(ContextMenuItem, { key: 'refresh', onSelect: () => void refresh(), children: '↻ Aggiorna' }),
-              jsx(ContextMenuItem, { key: 'config', onSelect: () => setConfigOpen(true), children: '⚙ Configura chiavi' }),
+              jsx(ContextMenuItem, { key: 'refresh', onSelect: () => void refresh(), children: '↻ Refresh' }),
+              jsx(ContextMenuItem, { key: 'config', onSelect: () => setConfigOpen(true), children: '⚙ Configure keys' }),
               jsx(ContextMenuSeparator, { key: 'sep' }),
-              jsx(ContextMenuItem, { key: 'hide', onSelect: hide, children: '✕ Nascondi dalla status bar' }),
+              jsx(ContextMenuItem, { key: 'hide', onSelect: hide, children: '✕ Hide from status bar' }),
             ],
           }),
         ],
@@ -618,11 +640,11 @@ export default {
       area: PALETTE_AREA,
       data: {
         id: `${ID}.show`,
-        label: 'Usage Stats: Mostra',
-        keywords: ['usage', 'stats', 'provider', 'balance', 'mostra', 'show', 'configura', 'chiavi'],
+        label: 'Usage Stats: Show',
+        keywords: ['usage', 'stats', 'provider', 'balance', 'show', 'mostra'],
         run: () => {
           try { window.__usageStatsShow?.() } catch { /* ok */ }
-          host.notify({ kind: 'info', message: 'Usage Stats chip ripristinato.' })
+          host.notify({ kind: 'info', message: 'Usage Stats chip restored.' })
         },
       },
     })
@@ -633,8 +655,8 @@ export default {
       area: PALETTE_AREA,
       data: {
         id: `${ID}.config`,
-        label: 'Usage Stats: Configura chiavi',
-        keywords: ['usage', 'stats', 'provider', 'api key', 'configura', 'chiavi'],
+        label: 'Usage Stats: Configure keys',
+        keywords: ['usage', 'stats', 'provider', 'api key', 'keys', 'configure', 'configura', 'chiavi'],
         run: () => { try { window.__usageStatsOpen?.() } catch { /* ok */ } },
       },
     })
