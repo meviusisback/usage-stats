@@ -441,17 +441,6 @@ function UsageChip({ rest, storage }) {
   const [anchor, setAnchor] = useState(null)
   const modelSlug = useValue(host.state.model)
 
-  // TEMP diagnostics: telemetry mirrored to the backend for remote debugging.
-  const note = useCallback((msg) => {
-    try { rest(`/debug_note?msg=${encodeURIComponent(msg)}`, { method: 'GET', timeoutMs: 5000 }) } catch { /* ok */ }
-  }, [rest])
-
-  useEffect(() => {
-    let stored = ''
-    try { stored = window.localStorage.getItem('hermes.desktop.composer.provider') || '' } catch { /* ok */ }
-    note(`[mount] model=${modelSlug || '?'} storedProvider=${stored || '?'} hiddenStorage=${(() => { try { return String(storage?.get?.('hidden')) } catch { return '?' } })()}`)
-  }, [])
-
 
   // Monotonic token: a slow/stalled refresh must never overwrite fresher
   // state written by a later tick or a manual 'Refresh' click.
@@ -509,7 +498,6 @@ function UsageChip({ rest, storage }) {
         }
       }
       if (cancelled) return
-      note(`[gate] slug=${modelSlug} stored=${stored} → provider=${provider}`)
       setActiveProvider(provider)
       setProviderResolved(Boolean(provider || modelSlug || stored))
     }
@@ -635,7 +623,6 @@ function UsageChip({ rest, storage }) {
     type: 'button',
     onClick: (e) => {
       const rect = e.currentTarget.getBoundingClientRect()
-      note(`[click] rect=${Math.round(rect.bottom)},${Math.round(rect.right)} panelOpen=${panelOpen} listed=${listed.length}`)
       void refresh()
       setAnchor({ top: rect.top, bottom: rect.bottom, right: rect.right })
       setPanelOpen((open) => !open)
