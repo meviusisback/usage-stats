@@ -30,7 +30,6 @@ import {
   ContextMenuItem, ContextMenuSeparator,
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
   Input,
-  Popover, PopoverContent, PopoverTrigger,
   PALETTE_AREA,
 } from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
@@ -567,11 +566,13 @@ function UsageChip({ rest, storage }) {
   }
 
   const listed = widgetProviders(allProviders)
-  const panel = jsx(PopoverContent, {
+  const panel = jsx('div', {
     key: 'panel',
-    align: 'end',
-    sideOffset: 6,
-    className: 'w-64 p-1.5',
+    className: cn(
+      'absolute right-0 top-full z-50 mt-1 w-64 rounded-lg p-1.5',
+      'border border-(--ui-stroke-secondary) bg-[var(--popover-surface)] text-popover-foreground backdrop-blur-md shadow-lg',
+      '[--popover-surface:color-mix(in_srgb,var(--ui-bg-elevated)_92%,transparent)]',
+    ),
     children: [
       jsx('div', {
         key: 'head',
@@ -607,22 +608,12 @@ function UsageChip({ rest, storage }) {
   })
 
   return jsx('div', {
+    className: 'relative inline-flex h-full items-center',
     children: [
       jsx(ContextMenu, {
         key: 'ctx',
         children: [
-          jsx(ContextMenuTrigger, {
-            key: 'trigger',
-            asChild: true,
-            children: jsx(Popover, {
-              key: 'pop',
-              open: panelOpen,
-              children: [
-                jsx(PopoverTrigger, { key: 'pt', asChild: true, children: chip }),
-                panel,
-              ],
-            }),
-          }),
+          jsx(ContextMenuTrigger, { key: 'trigger', children: chip }),
           jsx(ContextMenuContent, {
             key: 'menu',
             children: [
@@ -634,12 +625,15 @@ function UsageChip({ rest, storage }) {
           }),
         ],
       }),
-      jsx(ConfigDialog, {
-        key: 'dialog',
-        open: configOpen,
-        onOpenChange: setConfigOpen,
-        configured: summary?.apiKeyConfigured,
-      }),
+      // Click-outside catcher + panel. Plain DOM toggling — the Radix
+      // Popover-inside-ContextMenuTrigger slot chain never opened in the
+      // plugin realm.
+      panelOpen ? jsx('div', {
+        key: 'backdrop',
+        className: 'fixed inset-0 z-40',
+        onClick: () => setPanelOpen(false),
+      }) : null,
+      panelOpen ? panel : null,
     ],
   })
 }
