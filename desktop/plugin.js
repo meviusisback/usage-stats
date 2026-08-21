@@ -469,20 +469,23 @@ function UsageChip({ rest, storage }) {
     }
   }, [rest])
 
-  // Model gate: host.state.model holds the composer's model id, which is a
-  // bare name ('ox-alpha-free') with no provider hint. Try token matching
-  // first; when that fails ask the backend which provider serves the
-  // configured default model. ('config.get' is not a plugin-reachable RPC —
-  // the earlier version of this gate never resolved because of it.)
+  // Model gate. The composer persists its pick as TWO localStorage entries:
+  // 'hermes.desktop.composer.model' (exposed live via host.state.model) and
+  // 'hermes.desktop.composer.provider' (e.g. 'opencode-go' / 'openrouter').
+  // The provider entry is the authoritative signal — model ids are bare
+  // names ('ox-alpha-free') or vendor-prefixed openrouter ids
+  // ('deepseek/deepseek-v4-pro') whose prefix is NOT the serving provider.
+  // Resolution order: persisted provider → token match on the model id →
+  // backend's configured default. ('config.get' is not a plugin-reachable
+  // RPC; the first version of this gate never resolved because of it.)
   useEffect(() => {
     let cancelled = false
-    if (!modelSlug) {
-      setProviderResolved(false)
-      return () => { cancelled = true }
-    }
-    const direct = providerIdFor(modelSlug, '')
     const resolve = async () => {
-      let provider = direct
+      let stored = ''
+      try {
+        stored = window.localStorage.getItem('hermes.desktop.composer.provider') || ''
+      } catch { /* localStorage unavailable */ }
+      let provider = providerIdFor(stored, '') || providerIdFor(modelSlug, '')
       if (!provider && rest) {
         try {
           const res = await rest('/active_provider', { method: 'GET', timeoutMs: 10_000 })
@@ -493,7 +496,7 @@ function UsageChip({ rest, storage }) {
       }
       if (cancelled) return
       setActiveProvider(provider)
-      setProviderResolved(true)
+      setProviderResolved(Boolean(provider || modelSlug || stored))
     }
     void resolve()
     return () => { cancelled = true }
