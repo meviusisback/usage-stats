@@ -441,11 +441,15 @@ function UsageChip({ rest, storage }) {
   const [anchor, setAnchor] = useState(null)
   const modelSlug = useValue(host.state.model)
 
-  // TEMP: confirm the current build is live and report gate inputs.
+  // TEMP diagnostics: telemetry mirrored to the backend for remote debugging.
+  const note = useCallback((msg) => {
+    try { rest(`/debug_note?msg=${encodeURIComponent(msg)}`, { method: 'GET', timeoutMs: 5000 }) } catch { /* ok */ }
+  }, [rest])
+
   useEffect(() => {
-    try {
-      host.notify({ kind: 'info', message: `[usage-stats] loaded · model=${modelSlug || '(none)'} · provider=${window.localStorage.getItem('hermes.desktop.composer.provider') || '(none)'}` })
-    } catch { /* notify unavailable */ }
+    let stored = ''
+    try { stored = window.localStorage.getItem('hermes.desktop.composer.provider') || '' } catch { /* ok */ }
+    note(`[mount] model=${modelSlug || '?'} storedProvider=${stored || '?'} hiddenStorage=${(() => { try { return String(storage?.get?.('hidden')) } catch { return '?' } })()}`)
   }, [])
 
 
@@ -505,6 +509,7 @@ function UsageChip({ rest, storage }) {
         }
       }
       if (cancelled) return
+      note(`[gate] slug=${modelSlug} stored=${stored} → provider=${provider}`)
       setActiveProvider(provider)
       setProviderResolved(Boolean(provider || modelSlug || stored))
     }
@@ -541,6 +546,7 @@ function UsageChip({ rest, storage }) {
   const active = allProviders.find(
     (p) => p.gatewaySlug && p.kind !== 'note' && providerIdFor(p.gatewaySlug, '') === activeProvider,
   ) || allProviders.find((p) => p.id === activeProvider)
+  const listed = widgetProviders(allProviders)
 
   let chipChildren
   if (!providerResolved) {
@@ -559,12 +565,18 @@ function UsageChip({ rest, storage }) {
       jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
       jsx('span', { key: 'err', className: 'text-[0.625rem] text-(--destructive)', children: '⚠' }),
     ]
+  } else if (listed.length > 0) {
+    // No provider associated with the current model (e.g. a local Ollama
+    // model): keep a neutral chip so the widget stays reachable — it never
+    // shows measures for an unrelated provider.
+    chipChildren = [
+      jsx('span', { key: 'name', className: 'font-semibold text-(--ui-text-quaternary)', children: 'US' }),
+    ]
   } else {
-    // Unsupported/unconfigured active provider — hide by design.
+    // Nothing configured at all — nothing to show.
     return null
   }
 
-  const listed = widgetProviders(allProviders)
   const panel = anchor ? jsx('div', {
     key: 'panel',
     style: {
@@ -612,8 +624,9 @@ function UsageChip({ rest, storage }) {
     ),
     type: 'button',
     onClick: (e) => {
-      void refresh()
       const rect = e.currentTarget.getBoundingClientRect()
+      note(`[click] rect=${Math.round(rect.bottom)},${Math.round(rect.right)} panelOpen=${panelOpen} listed=${listed.length}`)
+      void refresh()
       setAnchor({ bottom: rect.bottom, right: rect.right })
       setPanelOpen((open) => !open)
     },

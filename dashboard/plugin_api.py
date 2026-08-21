@@ -35,7 +35,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 import yaml
 
@@ -527,6 +527,24 @@ def active_provider() -> dict[str, Any]:
 
 
 # --- routes -------------------------------------------------------------------
+
+
+# --- TEMP diagnostics: renderer click/gate telemetry (remove after fix) -------
+
+_debug_notes: list[str] = []
+
+
+@router.get("/debug_notes")
+def debug_notes() -> dict[str, Any]:
+    return {"notes": list(_debug_notes)}
+
+
+@router.get("/debug_note")
+def debug_note(msg: str = "") -> dict[str, Any]:
+    _debug_notes.append(f"{time.strftime('%H:%M:%S')} {msg[:300]}")
+    del _debug_notes[:-200]
+    return {"ok": True}
+
 
 @router.get("/health")
 def health() -> dict[str, Any]:
