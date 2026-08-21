@@ -86,11 +86,9 @@ active model's provider row is highlighted.
   days beyond (`now` once the timestamp passes). The hover tooltip spells it
   out ("resets in 2d"). Computed at render time and refreshed on every poll,
   so it never goes stale. Windows without a usable `resetsAt` simply omit it.
-- **Right-click menu** on the chip: `↻ Refresh` (force refresh),
-  `⚙ Configure keys` (open the key dialog), and
-  `✕ Hide from status bar` (hide, persisted across restarts).
-- **⌘K commands** — `Usage Stats: Show` re-shows the chip after hiding,
-  `Usage Stats: Configure keys` opens the key dialog directly.
+- **Right-click menu** on the chip: `↻ Refresh` (force refresh) and
+  `⚙ Configure keys` (open the key dialog).
+- **⌘K command** — `Usage Stats: Configure keys` opens the key dialog directly.
 - **Key config dialog** — on first run (no provider key configured) a popup
   opens with masked `password` inputs for all 8 providers. Copying the entered
   keys writes the formatted `KEY=VALUE` lines to the **local clipboard only**

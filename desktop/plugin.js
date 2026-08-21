@@ -16,8 +16,8 @@
  *     credentials, so NO API key or backend is needed for these. This mirrors
  *     the technique used by the resetwatch plugin.
  *
- * Right-click the chip: "Refresh" / "Hide" / "Configure keys".
- * Re-show: ⌘K → "Usage Stats: Show".
+ * Right-click the chip: "Refresh" / "Configure keys".
+ * Left-click opens the configured-providers widget.
  *
  * The "Configure keys" dialog collects them in masked password inputs and
  * copies the formatted `KEY=VALUE` lines to the local clipboard (or the
@@ -436,18 +436,17 @@ function UsageChip({ rest, storage }) {
   const [fetchError, setFetchError] = useState(null)
   const [activeProvider, setActiveProvider] = useState(null)
   const [providerResolved, setProviderResolved] = useState(false)
-  const [hidden, setHidden] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [anchor, setAnchor] = useState(null)
   const modelSlug = useValue(host.state.model)
 
+  // TEMP: confirm the current build is live and report gate inputs.
   useEffect(() => {
     try {
-      const stored = storage?.get?.('hidden')
-      if (stored) setHidden(true)
-    } catch { /* storage unavailable */ }
-  }, [storage])
+      host.notify({ kind: 'info', message: `[usage-stats] loaded · model=${modelSlug || '(none)'} · provider=${window.localStorage.getItem('hermes.desktop.composer.provider') || '(none)'}` })
+    } catch { /* notify unavailable */ }
+  }, [])
 
 
   // Monotonic token: a slow/stalled refresh must never overwrite fresher
@@ -520,21 +519,10 @@ function UsageChip({ rest, storage }) {
     return () => clearInterval(timer)
   }, [refresh])
 
-  const hide = useCallback(() => {
-    setHidden(true)
-    try { storage?.set?.('hidden', true) } catch { /* ok */ }
-  }, [storage])
-
-  const show = useCallback(() => {
-    setHidden(false)
-    try { storage?.set?.('hidden', false) } catch { /* ok */ }
-  }, [storage])
-
   useEffect(() => {
-    window.__usageStatsShow = show
     window.__usageStatsOpen = () => setConfigOpen(true)
-    return () => { delete window.__usageStatsShow; delete window.__usageStatsOpen }
-  }, [show])
+    return () => { delete window.__usageStatsOpen }
+  }, [])
 
   const [autoOpened, setAutoOpened] = useState(false)
   useEffect(() => {
@@ -547,7 +535,6 @@ function UsageChip({ rest, storage }) {
 
   // Merge key-based + gateway-native providers for display.
   const keyProviders = Array.isArray(summary?.providers) ? summary.providers : []
-  if (hidden) return null
   const allProviders = [...keyProviders, ...gatewayProviders]
 
   // The provider whose model is currently selected in the composer.
@@ -645,8 +632,6 @@ function UsageChip({ rest, storage }) {
             children: [
               jsx(ContextMenuItem, { key: 'refresh', onSelect: () => void refresh(), children: '↻ Refresh' }),
               jsx(ContextMenuItem, { key: 'config', onSelect: () => setConfigOpen(true), children: '⚙ Configure keys' }),
-              jsx(ContextMenuSeparator, { key: 'sep' }),
-              jsx(ContextMenuItem, { key: 'hide', onSelect: hide, children: '✕ Hide from status bar' }),
             ],
           }),
         ],
@@ -677,21 +662,6 @@ export default {
       render: () => jsx(UsageChip, { rest: ctx.rest, storage: ctx.storage }),
     })
 
-    ctx.register({
-      id: 'show-command',
-      area: PALETTE_AREA,
-      data: {
-        id: `${ID}.show`,
-        label: 'Usage Stats: Show',
-        keywords: ['usage', 'stats', 'provider', 'balance', 'show', 'mostra'],
-        run: () => {
-          try { window.__usageStatsShow?.() } catch { /* ok */ }
-          host.notify({ kind: 'info', message: 'Usage Stats chip restored.' })
-        },
-      },
-    })
-
-    // ⌘K command to open the key config dialog directly.
     ctx.register({
       id: 'config-command',
       area: PALETTE_AREA,
