@@ -263,17 +263,18 @@ If the chip reports `404: {"detail":"Plugin not found"}`, check all of these:
 - Desktop and backend are using the same profile
 
 ## Development and tests
-
 ```bash
 python -m pytest tests -q --ignore=tests/desktop_pure.test.mjs
 node --test tests/desktop_pure.test.mjs
-node --check desktop/plugin.js
 python -m py_compile dashboard/plugin_api.py
 ```
 
 `desktop_pure.test.mjs` slices the dependency-free pure functions out of
-`desktop/plugin.js` (model gating, reset countdown) and pins their contracts —
-the pytest suite cannot import the chip because of its SDK imports.
+`desktop/plugin.js` (model gating, reset countdown) AND re-imports the whole
+plugin as strict ESM after loader-style specifier rewriting — Hermes loads
+door plugins as blob modules (always ESM), where plain `node --check` on the
+`.js` file can give a false pass on unbalanced-bracket states.
+
 
 The backend sanitizes the upstream response and returns only the documented
 usage/balance fields; it never returns the API key or request headers.

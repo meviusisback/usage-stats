@@ -227,6 +227,7 @@ function WidgetRow({ p, active }) {
                 jsx('span', { className: 'text-(--ui-text-quaternary)', children: part.label }),
                 jsx('span', { style: { color: percentTone(part.percent) }, children: part.text }),
               ] }),
+            ]
             return i === 0 ? item : [jsx('span', { key: `sep-${part.id}`, className: 'text-(--ui-text-quaternary)', children: '·' }), ...item]
           }),
         })
@@ -546,11 +547,14 @@ function UsageChip({ rest, storage }) {
     return null
   }
 
+
+  const listed = widgetProviders(allProviders)
   const panel = jsx(PopoverContent, {
     key: 'panel',
     align: 'end',
     sideOffset: 6,
     className: 'w-64 p-1.5',
+    children: [
       jsx('div', {
         key: 'head',
         className: 'px-1.5 pb-1 pt-0.5 text-[0.625rem] font-semibold text-(--ui-text-quaternary)',

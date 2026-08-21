@@ -110,6 +110,28 @@ test('widgetProviders lists only providers with data', () => {
   assert.deepEqual(listed.map((p) => p.id), ['opencode', 'openrouter', 'gw:kimi'])
 })
 
+test('plugin.js parses as strict ESM under loader-style rewriting', async () => {
+  // Regression: `node --check` on the .js file gives a FALSE PASS on some
+  // unbalanced-bracket states (lenient goal), while Hermes imports the
+  // rewritten source as a blob module — always strict ESM. Replicate the
+  // loader: rewrite bare specifiers to stub data-URLs, then import.
+  const importRe = /(from\s*|import\s*\(\s*|import\s+)(['"])([^'"]+)\2/g
+  const needed = new Map()
+  for (const m of src.matchAll(/import\s*\{([^}]+)\}\s*from\s*['"]([^'"]+)['"]/g)) {
+    const names = m[1].split(',').map((s) => s.trim().split(/\s+as\s+/)[0]).filter(Boolean)
+    needed.set(m[2], [...(needed.get(m[2]) ?? []), ...names])
+  }
+  const out = src.replace(importRe, (whole, pre, quote, spec) => {
+    if (!needed.has(spec)) return whole
+    const stub = `export default {}\n` + needed.get(spec).map((n) => `export const ${n} = undefined`).join('\n')
+    return `${pre}${quote}data:text/javascript,${encodeURIComponent(stub)}${quote}`
+  })
+  const url = `data:text/javascript,${encodeURIComponent(out)}`
+  const mod = await import(url)
+  assert.equal(mod.default?.id, 'usage-stats')
+  assert.equal(typeof mod.default?.register, 'function')
+})
+
 test('widgetProviders tolerates missing payload', () => {
   assert.deepEqual(widgetProviders(undefined), [])
   assert.deepEqual(widgetProviders(null), [])
