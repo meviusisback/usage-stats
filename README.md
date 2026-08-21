@@ -4,14 +4,15 @@ A unified Hermes Agent plugin that shows **usage / balance** for the provider
 backing the currently-selected model, directly in the Hermes Desktop status bar:
 
 ```text
-OC 5h 40% · W 64% · M 38%      (OpenCode Go — rolling / weekly / monthly windows)
-OR $1.82                       (OpenRouter — credits remaining)
-DS $6.90                       (DeepSeek — account balance)
-KI ¥0.00                       (Kimi / Moonshot)
-NV $—                          (NovitaAI)
-Z ¥—                           (ZAI / Zhipu)
-AB ¥—                          (Alibaba / DashScope)
-AR $—                          (Arcee AI)
+OC 5h 40% (3h) · W 64% (2d) · M 38% (12d)   (OpenCode Go — rolling / weekly /
+                                             monthly windows, with time-to-reset)
+OR $1.82                                    (OpenRouter — credits remaining)
+DS $6.90                                    (DeepSeek — account balance)
+KI ¥0.00                                    (Kimi / Moonshot)
+NV $—                                       (NovitaAI)
+Z ¥—                                        (ZAI / Zhipu)
+AB ¥—                                       (Alibaba / DashScope)
+AR $—                                       (Arcee AI)
 ```
 
 The chip is **model-gated**: it shows only the provider of the active model
@@ -29,7 +30,7 @@ It contains two coordinated halves:
 
 | Display | Provider | Metric | Endpoint (key) |
 |---------|----------|--------|----------------|
-| `OC` | OpenCode Go (+ Zen, same account) | % used (5h / week / month windows) | `opencode.ai/zen/go/v1/usage` (`OPENCODE_GO_API_KEY`) |
+| `OC` | OpenCode Go (+ Zen, same account) | % used + reset time (5h / week / month windows) | `opencode.ai/zen/go/v1/usage` (`OPENCODE_GO_API_KEY`) |
 | `OR` | OpenRouter | USD credits remaining | `openrouter.ai/api/v1/credits` (`OPENROUTER_API_KEY`) |
 | `DS` | DeepSeek | USD balance | `api.deepseek.com/user/balance` (`DEEPSEEK_API_KEY`) |
 | `KI` | Kimi / Moonshot | CNY balance | `api.moonshot.cn/v1/users/me/balance` (`KIMI_API_KEY` / `MOONSHOT_API_KEY`) |
@@ -68,6 +69,11 @@ shows all configured providers).
   automatically on model change (plus a 60s safety poll).
 - **OpenCode three-window split** — rolling (5h), weekly, monthly usage
   percentages with color thresholds (green / accent / red).
+- **Reset countdowns per window** — each OpenCode window shows its
+  time-to-reset inline: `5h 79% (2d)`. Minutes under an hour, hours under 48h,
+  days beyond (`now` once the timestamp passes). The hover tooltip spells it
+  out ("resets in 2d"). Computed at render time and refreshed on every poll,
+  so it never goes stale. Windows without a usable `resetsAt` simply omit it.
 - **Right-click menu** on the chip: `↻ Aggiorna` (force refresh),
   `⚙ Configura chiavi` (open the key dialog), and
   `✕ Nascondi dalla status bar` (hide, persisted across restarts).
@@ -215,17 +221,24 @@ The summary route (all providers) is:
 ```text
 GET /api/plugins/usage-stats/summary
 ```
-
-It returns a `providers` array plus an `apiKeyConfigured` map of
-`{ provider_id: boolean }` — which keys the backend found in the environment
-(no key values are ever returned):
-
 ```json
 {
-  "providers": [ { "id": "opencode", "display": "OC", "label": "40%", ... } ],
-  "apiKeyConfigured": { "opencode": true, "openrouter": false, "deepseek": true, ... }
+  "providers": [
+    {
+      "id": "opencode", "display": "OC", "label": "40%",
+      "windows": [
+        { "id": "rolling", "label": "5h", "percent": 40.0, "resetsAt": "2026-08-21T12:28:19.883Z" },
+        { "id": "weekly",  "label": "W",  "percent": 64.0, "resetsAt": "2026-08-24T00:00:00.883Z" },
+        { "id": "monthly", "label": "M",  "percent": 38.0, "resetsAt": "2026-09-06T17:06:53.883Z" }
+      ]
+    }
+  ],
+  "apiKeyConfigured": { "opencode": true, "openrouter": false, "deepseek": true }
 }
 ```
+
+`windows[].resetsAt` is the upstream ISO-8601 UTC reset timestamp; the chip
+renders it as a compact countdown. It is `null` when upstream omits it.
 
 A per-provider legacy route is also available at `/usage`.
 

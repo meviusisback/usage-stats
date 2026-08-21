@@ -3,7 +3,7 @@
   "label": "Usage Stats",
   "description": "Backend API for the multi-provider usage/balance desktop chip (OpenCode, OpenRouter, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, plus gateway-native Claude/Codex/Cursor/Nous).",
   "icon": "Activity",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "tab": {
     "path": "/usage-stats",
     "hidden": true

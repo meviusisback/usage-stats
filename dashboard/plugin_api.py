@@ -182,6 +182,7 @@ def _fetch_opencode(api_key: str) -> dict[str, Any]:
             "id": window["id"],
             "label": window["label"],
             "percent": (norm.get(window["id"]) or {}).get("percent"),
+            "resetsAt": (norm.get(window["id"]) or {}).get("resetsAt"),
         }
         for window in WINDOWS
     ]
@@ -499,6 +500,7 @@ def summary() -> dict[str, Any]:
         entry.update(metric)
         return entry  # type: ignore[return-value]
 
+    providers: list[dict[str, Any]] = [None] * len(PROVIDER_SPECS)
     with ThreadPoolExecutor(max_workers=len(PROVIDER_SPECS)) as pool:
         futures = {
             pool.submit(_fetch_one, spec): idx

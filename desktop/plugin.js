@@ -95,15 +95,37 @@ function providerIdFor(provider, baseUrl) {
   return null
 }
 
+// Compact time-to-reset: "<1m"/"38m" under an hour, "5h" under 48h, "2d" beyond.
+// Computed at render time — the chip re-renders on every poll (60s), so the
+// countdown self-corrects. Returns null when the window has no reset time.
+function resetCountdown(resetsAt) {
+  if (!resetsAt) return null
+  const t = Date.parse(resetsAt)
+  if (!Number.isFinite(t)) return null
+  const ms = t - Date.now()
+  if (ms <= 0) return 'now'
+  const mins = Math.floor(ms / 60_000)
+  if (mins < 1) return '<1m'
+  if (mins < 60) return `${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 48) return `${hours}h`
+  return `${Math.round(hours / 24)}d`
+}
+
 function WindowBadge({ w }) {
   const text = w.percent == null ? '—' : `${Math.round(w.percent)}%`
+  const reset = resetCountdown(w.resetsAt)
+  const tooltip = reset && reset !== 'now'
+    ? `${w.label} window: ${text} used — resets in ${reset}`
+    : `${w.label} window: ${text} used`
   return jsx(Tip, {
-    label: `${w.label} window: ${text} used`,
+    label: tooltip,
     children: jsx('span', {
       className: 'inline-flex items-center gap-0.5 text-[0.625rem] font-mono',
       children: [
         jsx('span', { className: 'text-(--ui-text-quaternary)', children: w.label }),
         jsx('span', { style: { color: percentTone(w.percent) }, children: text }),
+        reset ? jsx('span', { className: 'text-(--ui-text-quaternary)', children: `(${reset})` }) : null,
       ],
     }),
   })

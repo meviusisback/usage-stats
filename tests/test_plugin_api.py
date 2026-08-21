@@ -3,6 +3,7 @@ import sys
 import urllib.error
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -33,6 +34,15 @@ def make_client():
     app = FastAPI()
     app.include_router(plugin_api.router, prefix="/api/plugins/usage-stats")
     return TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_summary_cache():
+    """`/summary` caches for 45s; without this the first test's response
+    leaks into every later /summary test."""
+    plugin_api._summary_cache.clear()
+    yield
+    plugin_api._summary_cache.clear()
 
 
 def clear_provider_keys(monkeypatch):
@@ -253,12 +263,31 @@ def test_fetch_opencode_exposes_individual_windows(monkeypatch):
     metric = plugin_api._fetch_opencode("test-key")
 
     assert metric["windows"] == [
-        {"id": "rolling", "label": "5h", "percent": 40.0},
-        {"id": "weekly", "label": "W", "percent": 57.0},
-        {"id": "monthly", "label": "M", "percent": 34.0},
+        {"id": "rolling", "label": "5h", "percent": 40.0, "resetsAt": None},
+        {"id": "weekly", "label": "W", "percent": 57.0, "resetsAt": None},
+        {"id": "monthly", "label": "M", "percent": 34.0, "resetsAt": None},
     ]
     assert metric["label"] == "40%"
     assert metric["kind"] == "percent"
+
+
+def test_fetch_opencode_passes_through_reset_times(monkeypatch):
+    upstream = {
+        "usage": {
+            "rolling": {"percent": 0, "status": "ok", "resetsAt": "2026-08-21T12:28:19.883Z"},
+            "weekly": {"percent": 79, "status": "ok", "resetsAt": "2026-08-24T00:00:00.883Z"},
+            "monthly": {"percent": 46, "status": "ok", "resetsAt": "not-a-date"},
+        }
+    }
+    monkeypatch.setattr(plugin_api, "_request_usage", lambda _key: upstream)
+
+    metric = plugin_api._fetch_opencode("test-key")
+
+    windows = {w["id"]: w for w in metric["windows"]}
+    assert windows["rolling"]["resetsAt"] == "2026-08-21T12:28:19.883Z"
+    # Non-string values are sanitized to None; malformed strings pass through
+    # and are discarded client-side (Date.parse → NaN → no countdown).
+    assert windows["monthly"]["resetsAt"] == "not-a-date"
 
 
 # --- new providers (mocked fetchers) -----------------------------------------
