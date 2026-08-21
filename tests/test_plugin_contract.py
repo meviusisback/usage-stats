@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_dashboard_manifest_is_api_only_and_loadable():
     manifest = json.loads((ROOT / "dashboard" / "manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["name"] == "opencode-usage"
+    assert manifest["name"] == "usage-stats"
     assert manifest["api"] == "plugin_api.py"
     assert manifest["tab"]["hidden"] is True
     assert (ROOT / "dashboard" / manifest["entry"]).is_file()
