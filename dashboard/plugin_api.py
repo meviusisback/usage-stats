@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -75,6 +77,31 @@ def _read_api_key() -> str | None:
     return _read_key("OPENCODE_GO_API_KEY") or _read_key("OPENCODE_ZEN_API_KEY")
 
 
+class _StrictRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Only follow redirects to the SAME https host.
+
+    urllib's default handler forwards the Authorization header to redirect
+    targets and even permits https→http downgrades (CWE-319/CWE-522), which
+    would re-send provider API keys in cleartext or leak them to a third
+    host. Returning None makes HTTPRedirectHandler raise the 3xx as an
+    HTTPError instead of following it; _transport_error maps that to
+    'http-<code>'.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        parts = urllib.parse.urlparse(newurl)
+        origin = urllib.parse.urlparse(req.full_url)
+        if parts.scheme != "https" or parts.netloc != origin.netloc:
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(
+    _StrictRedirectHandler,
+    urllib.request.HTTPSHandler(context=ssl.create_default_context()),
+)
+
+
 def _request_json(url: str, api_key: str) -> Any:
     # OpenCode's edge rejects the default Python-urllib User-Agent with 403,
     # so we send a browser-like one everywhere.
@@ -86,8 +113,7 @@ def _request_json(url: str, api_key: str) -> Any:
             "User-Agent": USER_AGENT,
         },
     )
-    context = ssl.create_default_context()
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS, context=context) as response:
+    with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
         raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise ValueError("response-too-large")
@@ -114,9 +140,13 @@ def _normalize_usage(body: Any) -> dict[str, dict[str, Any] | None] | None:
             continue
 
         try:
-            percent = round(float(raw["percent"]), 1) if raw.get("percent") is not None else None
+            percent = float(raw["percent"]) if raw.get("percent") is not None else None
         except (TypeError, ValueError):
             percent = None
+        # 1e999 parses to inf; round(inf) would raise OverflowError downstream.
+        if percent is not None and not math.isfinite(percent):
+            percent = None
+        percent = round(percent, 1) if percent is not None else None
 
         normalized[window_id] = {
             "status": raw.get("status") if isinstance(raw.get("status"), str) else None,
@@ -143,10 +173,16 @@ def _pct(value: Any) -> str:
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:
+    """Coerce to a finite float; null/inf/nan strings fall back to ``default``.
+
+    Non-finite values must never reach labels ('$inf') or JSON (which
+    serializes them as null), so they are treated like unparsable input.
+    """
     try:
-        return float(value)
+        result = float(value)
     except (TypeError, ValueError):
         return default
+    return result if math.isfinite(result) else default
 
 
 def _extract_balance(
@@ -158,14 +194,19 @@ def _extract_balance(
     """Find a numeric balance value in a response dict.
 
     Tries ``field_names`` (and ``data.<field>`` when ``unwrap_data``) in order.
-    Returns ``None`` if no named field matches — never infers a balance from an
-    arbitrary numeric field (e.g. ``code`` / ``request_id``), which would show a
-    wrong balance to the user.  The caller maps ``None`` to an error payload.
+    Returns ``None`` if no named field holds a usable (non-null) number — never
+    infers a balance from an arbitrary numeric field (e.g. ``code`` /
+    ``request_id``), which would show a wrong balance to the user.  The caller
+    maps ``None`` to an error payload.
     """
     inner = body.get("data") if unwrap_data and isinstance(body.get("data"), dict) else body
     for key in field_names:
-        if key in inner:
-            return _safe_float(inner[key])
+        value = inner.get(key)
+        # A present-but-null field means "no data", not "$0.00" — skip it so
+        # the caller's `balance is None → unexpected-response` guard fires.
+        if value is None:
+            continue
+        return _safe_float(value)
     return None
 
 
@@ -235,11 +276,19 @@ def _fetch_deepseek(api_key: str) -> dict[str, Any]:
 
     total = 0.0
     currency = "USD"
+    found = False
     for info in infos:
         if not isinstance(info, dict):
             continue
         currency = info.get("currency") or currency
-        total += _safe_float(info.get("total_balance"))
+        raw_total = info.get("total_balance")
+        if raw_total is None:
+            continue
+        total += _safe_float(raw_total)
+        found = True
+
+    if not found:
+        return {"error": "unexpected-response"}
 
     value = round(total, 2)
     return {
@@ -259,7 +308,7 @@ def _fetch_kimi(api_key: str) -> dict[str, Any]:
     Currency: CNY.
     """
     body = _request_json(KIMI_BALANCE_URL, api_key)
-    if not isinstance(body, dict) or "available" not in body:
+    if not isinstance(body, dict) or body.get("available") is None:
         return {"error": "unexpected-response"}
 
     available = _safe_float(body.get("available"))
@@ -421,7 +470,7 @@ def _transport_error(exc: Exception) -> str:
         return f"http-{exc.code}"
     if isinstance(exc, (urllib.error.URLError, TimeoutError, OSError)):
         return "network-error"
-    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError, ValueError)):
+    if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError, ValueError, OverflowError)):
         return "unexpected-response"
     return "unknown-error"
 

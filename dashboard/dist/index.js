@@ -8,5 +8,5 @@
     return null;
   }
 
-  registry.register("opencode-usage", HiddenBackendPlugin);
+  registry.register("usage-stats", HiddenBackendPlugin);
 })();

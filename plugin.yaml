@@ -1,5 +1,5 @@
 name: usage-stats
-version: 2.2.0
+version: 2.2.1
 description: "Multi-provider usage/balance for the Hermes Desktop status bar (OpenCode, OpenRouter, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee — plus gateway-native Claude/Codex/Cursor/Nous)"
 author: meviusisback
 kind: standalone

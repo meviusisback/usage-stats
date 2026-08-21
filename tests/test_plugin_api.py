@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import urllib.error
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -135,17 +136,34 @@ def test_request_sends_browser_user_agent(monkeypatch):
         def __exit__(self, *_args):
             return False
 
-    def fake_urlopen(request, timeout=None, context=None):
+    def fake_open(request, timeout=None):
         captured["request"] = request
         return FakeResponse()
 
-    monkeypatch.setattr(plugin_api.urllib.request, "urlopen", fake_urlopen)
+    # Patch the module-level opener — _request_json no longer calls the
+    # module-global urlopen (it uses the strict-redirect opener).
+    monkeypatch.setattr(plugin_api._OPENER, "open", fake_open)
 
     plugin_api._request_usage("test-key")
 
     user_agent = captured["request"].get_header("User-agent")
     assert user_agent, "request must set a User-Agent header"
     assert "Python-urllib" not in user_agent
+
+
+def test_strict_redirect_handler_refuses_downgrades_and_cross_host():
+    req = urllib.request.Request("https://api.novita.ai/v3/account/balance")
+    handler = plugin_api._StrictRedirectHandler()
+
+    # https→http downgrade would re-send the Bearer key in cleartext.
+    assert handler.redirect_request(req, None, 302, "moved", {}, "http://api.novita.ai/x") is None
+    # Cross-host https would leak the key to a third party.
+    assert handler.redirect_request(req, None, 302, "moved", {}, "https://evil.example/x") is None
+    # Same-host https redirects are still followed.
+    followed = handler.redirect_request(req, None, 302, "moved", {}, "https://api.novita.ai/v3/other")
+    assert followed is not None
+    assert followed.full_url == "https://api.novita.ai/v3/other"
+
 
 
 # --- /summary (multi-provider) ------------------------------------------------
@@ -421,3 +439,36 @@ def test_extract_balance_returns_none_when_no_named_field():
 def test_extract_balance_unwraps_data():
     body = {"data": {"balance": 50.0}}
     assert plugin_api._extract_balance(body, ("balance",), unwrap_data=True) == 50.0
+
+
+# --- code-review regressions: null / non-finite upstream values ---------------
+
+def test_extract_balance_skips_null_field_instead_of_coercing_to_zero():
+    # A present-but-null balance means "no data" — must return None so the
+    # fetcher maps it to unexpected-response, not a red "$0.00".
+    assert plugin_api._extract_balance({"balance": None}, ("balance",)) is None
+
+
+def test_safe_float_rejects_non_finite_values():
+    assert plugin_api._safe_float("inf") == 0.0
+    assert plugin_api._safe_float("nan") == 0.0
+    assert plugin_api._safe_float(1e999) == 0.0
+    assert plugin_api._safe_float(None) == 0.0
+    assert plugin_api._safe_float("12.5") == 12.5
+
+
+def test_normalize_usage_rejects_non_finite_percent():
+    body = {"usage": {"rolling": {"percent": 1e999, "status": "ok"}}}
+    norm = plugin_api._normalize_usage(body)
+    assert norm["rolling"]["percent"] is None
+
+
+def test_fetch_kimi_null_available_is_unexpected_response(monkeypatch):
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: {"available": None})
+    assert plugin_api._fetch_kimi("test-key") == {"error": "unexpected-response"}
+
+
+def test_fetch_deepseek_all_null_totals_is_unexpected_response(monkeypatch):
+    fake = {"balance_infos": [{"currency": "CNY", "total_balance": None}]}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+    assert plugin_api._fetch_deepseek("test-key") == {"error": "unexpected-response"}

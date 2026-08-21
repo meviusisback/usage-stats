@@ -34,7 +34,7 @@ import {
   PALETTE_AREA,
 } from '@hermes/plugin-sdk'
 import { jsx } from 'react/jsx-runtime'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 const ID = 'usage-stats'
 const REFRESH_MS = 60_000
@@ -79,18 +79,36 @@ function balanceTone(value) {
 }
 
 // Map a model config (provider slug + base_url) to a provider id the chip knows.
+// The slug is matched by substring (short, controlled string); a base_url is
+// matched only against its HOSTNAME so a path like '/kimi-route' on an
+// unrelated proxy cannot map the model to the wrong provider.
+const _PROVIDER_TOKENS = [
+  ['opencode', ['opencode']],
+  ['openrouter', ['openrouter']],
+  ['deepseek', ['deepseek']],
+  ['kimi', ['kimi', 'moonshot']],
+  ['anthropic', ['anthropic', 'claude']],
+  ['openai-codex', ['codex']],
+  ['cursor', ['cursor']],
+  ['nous', ['nous']],
+  ['zai', ['zai', 'glm', 'zhipu', 'bigmodel', 'z.ai']],
+  ['novita', ['novita']],
+  ['alibaba', ['dashscope', 'alibaba', 'aliyuncs']],
+  ['arcee', ['arcee']],
+]
+
 function providerIdFor(provider, baseUrl) {
   for (const value of [provider, baseUrl]) {
     if (!value) continue
-    const v = String(value).toLowerCase()
-    if (v.includes('opencode')) return 'opencode'
-    if (v.includes('openrouter')) return 'openrouter'
-    if (v.includes('deepseek')) return 'deepseek'
-    if (v.includes('kimi') || v.includes('moonshot')) return 'kimi'
-    if (v.includes('anthropic') || v.includes('claude')) return 'anthropic'
-    if (v.includes('codex')) return 'openai-codex'
-    if (v.includes('cursor')) return 'cursor'
-    if (v.includes('nous')) return 'nous'
+    const raw = String(value).toLowerCase()
+    // base_url: match the host only; bare slugs have no URL structure.
+    let scope = raw
+    if (raw.includes('://')) {
+      try { scope = new URL(raw).host } catch { continue }
+    }
+    for (const [id, tokens] of _PROVIDER_TOKENS) {
+      if (tokens.some((t) => scope.includes(t))) return id
+    }
   }
   return null
 }
@@ -109,7 +127,10 @@ function resetCountdown(resetsAt) {
   if (mins < 60) return `${mins}m`
   const hours = Math.floor(mins / 60)
   if (hours < 48) return `${hours}h`
-  return `${Math.round(hours / 24)}d`
+  const days = Math.round(hours / 24)
+  // Sentinel/far-future timestamps would render '(2927702d)' — treat as none.
+  if (days > 365) return null
+  return `${days}d`
 }
 
 function WindowBadge({ w }) {
@@ -206,7 +227,10 @@ function mapGatewayProviders(account, bars) {
       error: null,
     })
   }
-  return out
+  // A 'nous' account.snapshot and the bars-derived portal entry would both
+  // emit id 'gw:nous' → duplicate React keys downstream. First one wins.
+  const seen = new Set()
+  return out.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)))
 }
 
 // --- Config dialog: masked inputs → copy to local clipboard (NEVER network) ---
@@ -214,9 +238,15 @@ function ConfigDialog({ open, onOpenChange, configured }) {
   const [values, setValues] = useState({})
   const [copied, setCopied] = useState(false)
 
+  // Drop typed keys from memory when the dialog closes — they live on the
+  // local clipboard only by design; no reason to keep them in React state.
+  useEffect(() => {
+    if (!open) { setValues({}); setCopied(false) }
+  }, [open])
+
   const rows = useMemo(() => KEY_SPECS.map((spec) => ({
     ...spec,
-    configured: configured ? !!configured[spec.id]?.configured : false,
+    configured: configured ? !!configured[spec.id] : false,
   })), [configured])
 
   const onChange = useCallback((key, value) => {
@@ -347,14 +377,21 @@ function UsageChip({ rest, storage }) {
     }
   }, [])
 
+  // Monotonic token: a slow/stalled refresh must never overwrite fresher
+  // state written by a later tick or a manual 'Aggiorna' click.
+  const refreshSeq = useRef(0)
   const refresh = useCallback(async () => {
+    const seq = ++refreshSeq.current
+    const stale = () => seq !== refreshSeq.current
     try {
       if (rest) {
         const response = await rest('/summary', { method: 'GET', timeoutMs: 20_000 })
+        if (stale()) return
         setSummary(response)
         setFetchError(null)
       }
     } catch (error) {
+      if (stale()) return
       setFetchError(error instanceof Error ? error.message : String(error))
     }
     // Gateway-native providers — no backend, no keys.
@@ -363,6 +400,7 @@ function UsageChip({ rest, storage }) {
         host.request('account.usage', {}).catch(() => null),
         host.request('usage.bars', {}).catch(() => null),
       ])
+      if (stale()) return
       setGatewayProviders(mapGatewayProviders(acc, bars))
     } catch {
       /* gateway-native data unavailable; key-based providers still work */
@@ -423,7 +461,7 @@ function UsageChip({ rest, storage }) {
   } else {
     // Prefer the active gateway-native provider when model-gated.
     const active = allProviders.find(
-      (p) => p.gatewaySlug && providerIdFor(p.gatewaySlug, '') === activeProvider,
+      (p) => p.gatewaySlug && p.kind !== 'note' && providerIdFor(p.gatewaySlug, '') === activeProvider,
     ) || allProviders.find((p) => p.id === activeProvider)
     if (active) {
       chipChildren = renderProvider(active)

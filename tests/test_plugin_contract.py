@@ -12,6 +12,10 @@ def test_dashboard_manifest_is_api_only_and_loadable():
     assert manifest["api"] == "plugin_api.py"
     assert manifest["tab"]["hidden"] is True
     assert (ROOT / "dashboard" / manifest["entry"]).is_file()
+    # The hidden-tab bundle must register the SAME id as the manifest — a
+    # stale bundle id (e.g. the pre-rename 'opencode-usage') orphans the tab.
+    bundle = (ROOT / "dashboard" / manifest["entry"]).read_text(encoding="utf-8")
+    assert f'registry.register("{manifest["name"]}"' in bundle
 
 
 def test_agent_manifest_uses_a_supported_kind_and_registration_shim():
