@@ -428,6 +428,7 @@ function UsageChip({ rest, storage }) {
   const [hidden, setHidden] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
+  const [anchor, setAnchor] = useState(null)
   const modelSlug = useValue(host.state.model)
 
   useEffect(() => {
@@ -566,13 +567,17 @@ function UsageChip({ rest, storage }) {
   }
 
   const listed = widgetProviders(allProviders)
-  const panel = jsx('div', {
+  const panel = anchor ? jsx('div', {
     key: 'panel',
     className: cn(
-      'absolute right-0 top-full z-50 mt-1 w-64 rounded-lg p-1.5',
+      'fixed z-50 mt-1 w-64 rounded-lg p-1.5',
       'border border-(--ui-stroke-secondary) bg-[var(--popover-surface)] text-popover-foreground backdrop-blur-md shadow-lg',
       '[--popover-surface:color-mix(in_srgb,var(--ui-bg-elevated)_92%,transparent)]',
     ),
+    style: {
+      left: Math.max(8, Math.min(anchor.right - 256, window.innerWidth - 264)),
+      top: anchor.bottom + 4,
+    },
     children: [
       jsx('div', {
         key: 'head',
@@ -595,7 +600,7 @@ function UsageChip({ rest, storage }) {
             })),
           }),
     ],
-  })
+  }) : null
 
   const chip = jsx('button', {
     className: cn(
@@ -603,7 +608,12 @@ function UsageChip({ rest, storage }) {
       'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
     ),
     type: 'button',
-    onClick: () => { void refresh(); setPanelOpen((open) => !open) },
+    onClick: (e) => {
+      void refresh()
+      const rect = e.currentTarget.getBoundingClientRect()
+      setAnchor(rect)
+      setPanelOpen((open) => !open)
+    },
     children: chipChildren,
   })
 
@@ -613,7 +623,7 @@ function UsageChip({ rest, storage }) {
       jsx(ContextMenu, {
         key: 'ctx',
         children: [
-          jsx(ContextMenuTrigger, { key: 'trigger', children: chip }),
+          jsx(ContextMenuTrigger, { key: 'trigger', asChild: true, children: chip }),
           jsx(ContextMenuContent, {
             key: 'menu',
             children: [
