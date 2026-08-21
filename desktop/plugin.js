@@ -603,7 +603,7 @@ function UsageChip({ rest, storage }) {
       'text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
     ),
     type: 'button',
-    onClick: () => void refresh(),
+    onClick: () => { void refresh(); setPanelOpen((open) => !open) },
     children: chipChildren,
   })
 
