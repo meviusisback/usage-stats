@@ -209,47 +209,58 @@ function renderProvider(provider) {
 // sanitized error) on the right. `active` highlights the provider whose
 // model is currently selected in the composer.
 function WidgetRow({ p, active }) {
+  // Door plugins get NO Tailwind CSS (the app's stylesheet only contains
+  // utilities compiled from the app's own source), so this widget is styled
+  // entirely with inline styles. Theme CSS vars work fine inline.
   const parts = windowParts(p.windows)
   const value = p.error
     ? jsx('span', {
         key: 'v',
-        className: 'font-mono text-[0.625rem] text-(--destructive)',
+        style: { fontFamily: 'monospace', fontSize: 10, color: '#f87171' },
         children: `⚠ ${p.error}`,
       })
     : parts
       ? jsx('span', {
           key: 'v',
-          className: 'flex items-center gap-1 font-mono text-[0.6875rem]',
+          style: { display: 'flex', alignItems: 'center', gap: 4, fontFamily: 'monospace', fontSize: 11 },
           children: parts.flatMap((part, i) => {
             const item = [
-              jsx('span', { key: part.id, className: 'inline-flex items-center gap-0.5', children: [
-                jsx('span', { className: 'text-(--ui-text-quaternary)', children: part.label }),
+              jsx('span', { key: part.id, style: { display: 'inline-flex', alignItems: 'center', gap: 2 }, children: [
+                jsx('span', { style: { color: 'var(--ui-text-quaternary)' }, children: part.label }),
                 jsx('span', { style: { color: percentTone(part.percent) }, children: part.text }),
               ] }),
             ]
-            return i === 0 ? item : [jsx('span', { key: `sep-${part.id}`, className: 'text-(--ui-text-quaternary)', children: '·' }), ...item]
+            return i === 0 ? item : [jsx('span', { key: `sep-${part.id}`, style: { color: 'var(--ui-text-quaternary)' }, children: '·' }), ...item]
           }),
         })
       : jsx('span', {
           key: 'v',
-          className: 'font-mono text-[0.6875rem]',
-          style: { color: p.kind === 'balance' ? balanceTone(p.value) : percentTone(p.value) },
+          style: {
+            fontFamily: 'monospace',
+            fontSize: 11,
+            color: p.kind === 'balance' ? balanceTone(p.value) : percentTone(p.value),
+          },
           children: p.label ?? '—',
         })
   return jsx(Tip, {
     label: p.error ? `${p.name} — ${p.error}` : (p.detail || `${p.name}: ${p.label}`),
     children: jsx('div', {
-      className: cn(
-        'flex items-center justify-between gap-3 rounded-md px-1.5 py-1',
-        active && 'bg-(--chrome-action-hover)',
-      ),
+      style: {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+        padding: '4px 6px',
+        borderRadius: 6,
+        background: active ? 'rgba(255, 255, 255, 0.08)' : 'transparent',
+      },
       children: [
         jsx('span', {
           key: 'n',
-          className: 'whitespace-nowrap text-[0.625rem]',
+          style: { whiteSpace: 'nowrap', fontSize: 10, display: 'flex', alignItems: 'center', gap: 4 },
           children: [
-            jsx('span', { key: 'd', className: 'font-mono text-(--ui-text-quaternary)', children: p.display }),
-            jsx('span', { key: 's', className: 'text-(--ui-text-secondary)', children: ` ${p.name}` }),
+            jsx('span', { key: 'd', style: { fontFamily: 'monospace', color: 'var(--ui-text-quaternary)' }, children: p.display }),
+            jsx('span', { key: 's', style: { color: 'var(--ui-text-secondary)' }, children: ` ${p.name}` }),
           ],
         }),
         value,
@@ -569,30 +580,35 @@ function UsageChip({ rest, storage }) {
   const listed = widgetProviders(allProviders)
   const panel = anchor ? jsx('div', {
     key: 'panel',
-    className: cn(
-      'fixed z-50 mt-1 w-64 rounded-lg p-1.5',
-      'border border-(--ui-stroke-secondary) bg-[var(--popover-surface)] text-popover-foreground backdrop-blur-md shadow-lg',
-      '[--popover-surface:color-mix(in_srgb,var(--ui-bg-elevated)_92%,transparent)]',
-    ),
     style: {
-      left: Math.max(8, Math.min(anchor.right - 256, window.innerWidth - 264)),
+      position: 'fixed',
+      zIndex: 2147483000,
+      left: Math.max(8, Math.min(anchor.right - 264, window.innerWidth - 272)),
       top: anchor.bottom + 4,
+      width: 264,
+      padding: 6,
+      background: 'var(--ui-bg-elevated, #1e1e22)',
+      color: 'var(--ui-text-secondary, #d4d4d8)',
+      border: '1px solid var(--ui-stroke-secondary, #3f3f46)',
+      borderRadius: 8,
+      boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
+      fontSize: 12,
     },
     children: [
       jsx('div', {
         key: 'head',
-        className: 'px-1.5 pb-1 pt-0.5 text-[0.625rem] font-semibold text-(--ui-text-quaternary)',
+        style: { padding: '2px 6px 4px', fontSize: 10, fontWeight: 600, color: 'var(--ui-text-quaternary)' },
         children: 'Usage — configured providers',
       }),
       listed.length === 0
         ? jsx('div', {
             key: 'empty',
-            className: 'px-1.5 py-2 text-[0.625rem] text-(--ui-text-tertiary)',
+            style: { padding: '8px 6px', fontSize: 11, color: 'var(--ui-text-tertiary)' },
             children: 'No keys configured — right-click → Configure keys',
           })
         : jsx('div', {
             key: 'rows',
-            className: 'flex flex-col gap-0.5',
+            style: { display: 'flex', flexDirection: 'column', gap: 2 },
             children: listed.map((p) => jsx(WidgetRow, {
               key: p.id,
               p,
@@ -611,7 +627,7 @@ function UsageChip({ rest, storage }) {
     onClick: (e) => {
       void refresh()
       const rect = e.currentTarget.getBoundingClientRect()
-      setAnchor(rect)
+      setAnchor({ bottom: rect.bottom, right: rect.right })
       setPanelOpen((open) => !open)
     },
     children: chipChildren,
@@ -640,7 +656,7 @@ function UsageChip({ rest, storage }) {
       // plugin realm.
       panelOpen ? jsx('div', {
         key: 'backdrop',
-        className: 'fixed inset-0 z-40',
+        style: { position: 'fixed', top: 0, right: 0, bottom: 0, left: 0, zIndex: 2147482000 },
         onClick: () => setPanelOpen(false),
       }) : null,
       panelOpen ? panel : null,
