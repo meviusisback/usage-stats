@@ -357,6 +357,19 @@ def test_fetch_kimi_normalizes_response(monkeypatch):
     assert "cash ¥32" in metric["detail"]
 
 
+def test_fetch_deepseek_caps_api_supplied_currency_length(monkeypatch):
+    # API-supplied text is inert (React escapes it) but must not be able to
+    # blow up the chip layout with an unbounded label.
+    fake = {"balance_infos": [{"currency": "X" * 1000, "total_balance": 5}]}
+    monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
+
+    metric = plugin_api._fetch_deepseek("test-key")
+
+    assert len(metric["label"]) < 40
+    assert metric["currency"] == "X" * 8
+
+
+
 def test_fetch_kimi_handles_zero_balance(monkeypatch):
     fake = {"available": 0, "voucher": 0, "cash": 0}
     monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)

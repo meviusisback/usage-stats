@@ -282,7 +282,9 @@ def _fetch_deepseek(api_key: str) -> dict[str, Any]:
     for info in infos:
         if not isinstance(info, dict):
             continue
-        currency = info.get("currency") or currency
+        # API-supplied text: cap length so a hostile response can't blow up
+        # the chip layout (rendered as inert text either way).
+        currency = str(info.get("currency") or currency)[:8]
         raw_total = info.get("total_balance")
         if raw_total is None:
             continue
@@ -374,7 +376,7 @@ def _fetch_alibaba(api_key: str) -> dict[str, Any]:
     if balance is None:
         return {"error": "unexpected-response"}
 
-    currency = str(inner.get("currency", "CNY")) if isinstance(inner, dict) else "CNY"
+    currency = str(inner.get("currency") or "CNY")[:8] if isinstance(inner, dict) else "CNY"
     return {
         "kind": "balance",
         "label": f"{balance:,.2f} {currency}",
