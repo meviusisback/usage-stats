@@ -438,19 +438,6 @@ function UsageChip({ rest, storage }) {
     } catch { /* storage unavailable */ }
   }, [storage])
 
-  const checkProvider = useCallback(async () => {
-    try {
-      const res = await host.request('config.get', { key: 'full' })
-      const modelCfg = res && typeof res === 'object' ? (res.config && res.config.model) : null
-      const provider = modelCfg && typeof modelCfg === 'object' ? modelCfg.provider : null
-      const baseUrl = modelCfg && typeof modelCfg === 'object' ? modelCfg.base_url : null
-      setActiveProvider(providerIdFor(provider, baseUrl))
-      setProviderResolved(true)
-    } catch {
-      setActiveProvider(null)
-      setProviderResolved(false)
-    }
-  }, [])
 
   // Monotonic token: a slow/stalled refresh must never overwrite fresher
   // state written by a later tick or a manual 'Refresh' click.
@@ -482,14 +469,24 @@ function UsageChip({ rest, storage }) {
     }
   }, [rest])
 
-  useEffect(() => { void checkProvider() }, [checkProvider, modelSlug])
+  // Model gate: host.state.model is the live atom holding the composer's
+  // model slug — no RPC round-trip. ('config.get' is not a plugin-reachable
+  // gateway RPC; requesting it always rejected, which left the chip stuck on
+  // the 'US …' placeholder behind the old show-all fallback.)
+  useEffect(() => {
+    if (!modelSlug) {
+      setProviderResolved(false)
+      return
+    }
+    setActiveProvider(providerIdFor(modelSlug, ''))
+    setProviderResolved(true)
+  }, [modelSlug])
 
   useEffect(() => {
-    void checkProvider()
     void refresh()
-    const timer = setInterval(() => { void checkProvider(); void refresh() }, REFRESH_MS)
+    const timer = setInterval(() => { void refresh() }, REFRESH_MS)
     return () => clearInterval(timer)
-  }, [checkProvider, refresh])
+  }, [refresh])
 
   const hide = useCallback(() => {
     setHidden(true)
