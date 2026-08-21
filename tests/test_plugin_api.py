@@ -67,6 +67,39 @@ def test_health_route_is_mounted_at_the_desktop_namespace(monkeypatch):
     }
 
 
+def test_active_provider_resolves_from_config_yaml(monkeypatch, tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  default: ox-alpha-free\n  provider: opencode-go\n"
+        "  base_url: https://opencode.ai/zen/go/v1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    body = make_client().get("/api/plugins/usage-stats/active_provider").json()
+
+    assert body == {"provider": "opencode"}
+
+
+def test_active_provider_unknown_config_returns_null(monkeypatch, tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        "model:\n  default: some-model\n  provider: gemini\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    body = make_client().get("/api/plugins/usage-stats/active_provider").json()
+
+    assert body == {"provider": None}
+
+
+def test_active_provider_missing_config_returns_null(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    body = make_client().get("/api/plugins/usage-stats/active_provider").json()
+
+    assert body == {"provider": None}
+
+
 def test_health_lists_configured_providers(monkeypatch):
     clear_provider_keys(monkeypatch)
     monkeypatch.setenv("HERMES_HOME", str(ROOT / "tests" / "fixtures" / "empty-home"))

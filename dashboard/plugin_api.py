@@ -37,6 +37,8 @@ from typing import Any, Callable
 
 from fastapi import APIRouter
 
+import yaml
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -473,6 +475,55 @@ def _transport_error(exc: Exception) -> str:
     if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError, ValueError, OverflowError)):
         return "unexpected-response"
     return "unknown-error"
+
+
+# --- configured-provider resolution -------------------------------------------
+
+# Same token table as the desktop chip's providerIdFor: maps free text (a
+# provider slug or base_url) to one of this plugin's provider ids.
+_PROVIDER_TOKENS: list[tuple[str, tuple[str, ...]]] = [
+    ("opencode", ("opencode",)),
+    ("openrouter", ("openrouter",)),
+    ("deepseek", ("deepseek",)),
+    ("kimi", ("kimi", "moonshot")),
+    ("novita", ("novita",)),
+    ("zai", ("zai", "glm", "zhipu", "bigmodel")),
+    ("alibaba", ("dashscope", "alibaba", "aliyuncs")),
+    ("arcee", ("arcee",)),
+]
+
+
+def _provider_id_for(text: str | None) -> str | None:
+    value = (text or "").lower()
+    for provider_id, tokens in _PROVIDER_TOKENS:
+        if any(token in value for token in tokens):
+            return provider_id
+    return None
+
+
+def _configured_provider() -> str | None:
+    """Provider id of the agent's configured default model (config.yaml).
+
+    The Desktop composer reports a bare model id ('ox-alpha-free') with no
+    provider hint, so the chip asks the backend which provider serves it.
+    """
+    home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+    with open(os.path.join(home, "config.yaml"), encoding="utf-8") as handle:
+        config = yaml.safe_load(handle) or {}
+    model_config = config.get("model") or {}
+    return (
+        _provider_id_for(model_config.get("provider"))
+        or _provider_id_for(model_config.get("base_url"))
+    )
+
+
+@router.get("/active_provider")
+def active_provider() -> dict[str, Any]:
+    """Provider id (or null) serving the agent's configured default model."""
+    try:
+        return {"provider": _configured_provider()}
+    except Exception:  # noqa: BLE001 - missing/invalid config is not a 500
+        return {"provider": None}
 
 
 # --- routes -------------------------------------------------------------------

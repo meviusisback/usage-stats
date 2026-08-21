@@ -469,18 +469,36 @@ function UsageChip({ rest, storage }) {
     }
   }, [rest])
 
-  // Model gate: host.state.model is the live atom holding the composer's
-  // model slug — no RPC round-trip. ('config.get' is not a plugin-reachable
-  // gateway RPC; requesting it always rejected, which left the chip stuck on
-  // the 'US …' placeholder behind the old show-all fallback.)
+  // Model gate: host.state.model holds the composer's model id, which is a
+  // bare name ('ox-alpha-free') with no provider hint. Try token matching
+  // first; when that fails ask the backend which provider serves the
+  // configured default model. ('config.get' is not a plugin-reachable RPC —
+  // the earlier version of this gate never resolved because of it.)
   useEffect(() => {
+    let cancelled = false
     if (!modelSlug) {
       setProviderResolved(false)
-      return
+      return () => { cancelled = true }
     }
-    setActiveProvider(providerIdFor(modelSlug, ''))
-    setProviderResolved(true)
-  }, [modelSlug])
+    const direct = providerIdFor(modelSlug, '')
+    const resolve = async () => {
+      let provider = direct
+      if (!provider && rest) {
+        try {
+          const res = await rest('/active_provider', { method: 'GET', timeoutMs: 10_000 })
+          provider = res?.provider ?? null
+        } catch {
+          provider = null
+        }
+      }
+      if (cancelled) return
+      setActiveProvider(provider)
+      setProviderResolved(true)
+    }
+    void resolve()
+    return () => { cancelled = true }
+  }, [modelSlug, rest])
+
 
   useEffect(() => {
     void refresh()
@@ -515,6 +533,7 @@ function UsageChip({ rest, storage }) {
 
   // Merge key-based + gateway-native providers for display.
   const keyProviders = Array.isArray(summary?.providers) ? summary.providers : []
+  if (hidden) return null
   const allProviders = [...keyProviders, ...gatewayProviders]
 
   // The provider whose model is currently selected in the composer.
@@ -543,7 +562,6 @@ function UsageChip({ rest, storage }) {
     // Unsupported/unconfigured active provider — hide by design.
     return null
   }
-
 
   const listed = widgetProviders(allProviders)
   const panel = jsx(PopoverContent, {
