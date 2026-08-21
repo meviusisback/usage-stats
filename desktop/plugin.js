@@ -579,20 +579,30 @@ function UsageChip({ rest, storage }) {
 
   const panel = anchor ? jsx('div', {
     key: 'panel',
-    style: {
-      position: 'fixed',
-      zIndex: 2147483000,
-      left: Math.max(8, Math.min(anchor.right - 264, window.innerWidth - 272)),
-      top: anchor.bottom + 4,
-      width: 264,
-      padding: 6,
-      background: 'var(--ui-bg-elevated, #1e1e22)',
-      color: 'var(--ui-text-secondary, #d4d4d8)',
-      border: '1px solid var(--ui-stroke-secondary, #3f3f46)',
-      borderRadius: 8,
-      boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
-      fontSize: 12,
-    },
+    style: (() => {
+      // The status bar can sit at the BOTTOM of a tall window — opening
+      // downward would push the panel off-screen (fixed elements are not
+      // scrollable into view). Flip above the chip when short on space.
+      const estHeight = 64 + listed.length * 26
+      let top = anchor.bottom + 4
+      if (top + estHeight > window.innerHeight - 8) {
+        top = Math.max(8, anchor.top - estHeight - 6)
+      }
+      return {
+        position: 'fixed',
+        zIndex: 2147483000,
+        left: Math.max(8, Math.min(anchor.right - 264, window.innerWidth - 272)),
+        top,
+        width: 264,
+        padding: 6,
+        background: 'var(--ui-bg-elevated, #1e1e22)',
+        color: 'var(--ui-text-secondary, #d4d4d8)',
+        border: '1px solid var(--ui-stroke-secondary, #3f3f46)',
+        borderRadius: 8,
+        boxShadow: '0 8px 24px rgba(0, 0, 0, 0.45)',
+        fontSize: 12,
+      }
+    })(),
     children: [
       jsx('div', {
         key: 'head',
@@ -627,7 +637,7 @@ function UsageChip({ rest, storage }) {
       const rect = e.currentTarget.getBoundingClientRect()
       note(`[click] rect=${Math.round(rect.bottom)},${Math.round(rect.right)} panelOpen=${panelOpen} listed=${listed.length}`)
       void refresh()
-      setAnchor({ bottom: rect.bottom, right: rect.right })
+      setAnchor({ top: rect.top, bottom: rect.bottom, right: rect.right })
       setPanelOpen((open) => !open)
     },
     children: chipChildren,
