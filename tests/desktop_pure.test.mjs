@@ -136,3 +136,74 @@ test('widgetProviders tolerates missing payload', () => {
   assert.deepEqual(widgetProviders(undefined), [])
   assert.deepEqual(widgetProviders(null), [])
 })
+
+// --- focused-session model gate (session.info live routes) -------------------
+
+// Slice the UsageChip's gate-resolution logic out of the component. The
+// component itself needs React + the plugin SDK; this reproduces its exact
+// resolution order over pure inputs so the contract is testable:
+//   focused session live route → composer persisted pick → backend default.
+function resolveActiveProvider({ liveRoute, storedProvider, modelSlug }) {
+  let provider = liveRoute
+    ? (providerIdFor(liveRoute.provider, '') || providerIdFor(liveRoute.model, ''))
+    : null
+  if (!provider) provider = providerIdFor(storedProvider, '') || providerIdFor(modelSlug, '')
+  return provider
+}
+
+test('live session route wins over the persisted composer pick', () => {
+  // The bug: composer localStorage stays 'deepseek' (profile-global default)
+  // while the focused chat switched to a Codex model — the chip must follow
+  // the session, not the default.
+  assert.equal(
+    resolveActiveProvider({ liveRoute: { provider: 'openai-codex', model: 'gpt-5-codex' }, storedProvider: 'deepseek', modelSlug: 'deepseek-chat' }),
+    'openai-codex')
+})
+
+test('gate falls back to the composer pick without a live route', () => {
+  // Draft chats (no session yet) still resolve from the persisted provider;
+  // a bare model slug alone is a weaker heuristic (vendor-prefixed openrouter
+  // ids match their prefix's token, which is why tier 2 prefers stored).
+  assert.equal(resolveActiveProvider({ liveRoute: null, storedProvider: 'opencode-go', modelSlug: 'ox-alpha-free' }), 'opencode')
+  assert.equal(resolveActiveProvider({ liveRoute: undefined, storedProvider: '', modelSlug: 'deepseek/deepseek-v4-pro' }), 'deepseek')
+})
+
+test('gate yields to the backend default when composer state is empty', () => {
+  // null here means "ask rest('/active_provider')" — the component's third tier.
+  assert.equal(resolveActiveProvider({ liveRoute: null, storedProvider: '', modelSlug: '' }), null)
+})
+
+// --- gateway-native snapshot mapping -----------------------------------------
+
+// mapGatewayProviders is dependency-free; extract it (and the provider dict
+// it reads) straight from source so the test cannot drift from the shipping
+// GATEWAY_PROVIDERS table.
+const mapGatewayProviders = new Function(
+  `${src.slice(src.indexOf('const GATEWAY_PROVIDERS'), src.indexOf('// --- Config dialog'))}\nreturn mapGatewayProviders`)()
+
+test('mapGatewayProviders consumes the /account_usage snapshot shape', () => {
+  const account = {
+    snapshots: [{
+      provider: 'openai-codex',
+      plan: 'Plus',
+      windows: [
+        { label: 'Session', used_percent: 8.0, resetsAt: minutesFromNow(240) },
+        { label: 'Weekly', used_percent: 76.0, resetsAt: minutesFromNow(2 * 24 * 60) },
+      ],
+      details: ['You have 1 reset credit banked'],
+    }],
+  }
+  const [chip] = mapGatewayProviders(account, null)
+  assert.equal(chip.id, 'gw:openai-codex')
+  assert.equal(chip.gatewaySlug, 'openai-codex')
+  assert.equal(chip.kind, 'percent')
+  assert.equal(chip.value, 8) // headline = first window, used_percent as-is
+  assert.deepEqual(chip.windows.map((w) => w.percent), [8, 76])
+})
+
+test('mapGatewayProviders degrades cleanly on empty or missing payloads', () => {
+  assert.deepEqual(mapGatewayProviders(null, null), [])
+  assert.deepEqual(mapGatewayProviders({ snapshots: [] }, null), [])
+  // a snapshot for an unknown provider slug is skipped, not rendered blank
+  assert.deepEqual(mapGatewayProviders({ snapshots: [{ provider: 'gemini', windows: [] }] }, null), [])
+})
