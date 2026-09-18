@@ -318,6 +318,20 @@ function mapGatewayProviders(account, bars) {
   return out.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)))
 }
 
+// A plugin's own backend (`dashboard/plugin_api.py`) mounts ONLY once, at the
+// desktop backend's process start, and ONLY for plugins listed in THAT
+// profile's `plugins.enabled` (GHSA-mcfc-hp25-cjv7). The desktop half, by
+// contrast, is app-level: it renders in every profile. So a profile that never
+// enabled the agent half still draws the chip while every `rest()` here 404s —
+// which used to read as "No keys configured", the wrong diagnosis (the keys are
+// fine; the route does not exist). Classify it so the panel can say so:
+// desktop REST errors carry the legacy "<status>: <body>" message.
+function restMissingRoute(error) {
+  const message = error instanceof Error ? error.message : String(error || '')
+  const status = /^\s*(\d{3})\b/.exec(message)
+  return status !== null && (status[1] === '404' || status[1] === '405')
+}
+
 // --- Config dialog: masked inputs → copy to local clipboard (NEVER network) ---
 function ConfigDialog({ open, onOpenChange, configured }) {
   const [values, setValues] = useState({})
@@ -434,6 +448,7 @@ function UsageChip({ rest, storage }) {
   const [summary, setSummary] = useState(null)
   const [gatewayProviders, setGatewayProviders] = useState([])
   const [fetchError, setFetchError] = useState(null)
+  const [backendMissing, setBackendMissing] = useState(false)
   const [activeProvider, setActiveProvider] = useState(null)
   const [providerResolved, setProviderResolved] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
@@ -476,6 +491,7 @@ function UsageChip({ rest, storage }) {
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current
     const stale = () => seq !== refreshSeq.current
+    let routeMissing = false
     try {
       if (rest) {
         const response = await rest('/summary', { method: 'GET', timeoutMs: 20_000 })
@@ -485,6 +501,7 @@ function UsageChip({ rest, storage }) {
       }
     } catch (error) {
       if (stale()) return
+      routeMissing = restMissingRoute(error)
       setFetchError(error instanceof Error ? error.message : String(error))
     }
     // Gateway-native providers — snapshots come from THIS plugin's backend
@@ -500,12 +517,14 @@ function UsageChip({ rest, storage }) {
         host.request('usage.bars', {}),
       ])
       if (stale()) return
+      if (accRes.status === 'rejected' && restMissingRoute(accRes.reason)) routeMissing = true
       const acc = accRes.status === 'fulfilled' ? accRes.value : null
       const bars = barsRes.status === 'fulfilled' ? barsRes.value : null
       setGatewayProviders(mapGatewayProviders(acc, bars))
     } catch {
       /* gateway-native data unavailable; key-based providers still work */
     }
+    setBackendMissing(routeMissing)
   }, [rest])
 
   // Model gate. Resolution order:
@@ -643,7 +662,9 @@ function UsageChip({ rest, storage }) {
         ? jsx('div', {
             key: 'empty',
             style: { padding: '8px 6px', fontSize: 11, color: 'var(--ui-text-tertiary)' },
-            children: 'No keys configured — right-click → Configure keys',
+            children: backendMissing
+              ? "This profile hasn't enabled the plugin's backend — add \"usage-stats\" to its plugins.enabled, then restart Hermes"
+              : 'No keys configured — right-click → Configure keys',
           })
         : jsx('div', {
             key: 'rows',

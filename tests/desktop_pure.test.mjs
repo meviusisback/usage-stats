@@ -207,3 +207,40 @@ test('mapGatewayProviders degrades cleanly on empty or missing payloads', () => 
   // a snapshot for an unknown provider slug is skipped, not rendered blank
   assert.deepEqual(mapGatewayProviders({ snapshots: [{ provider: 'gemini', windows: [] }] }, null), [])
 })
+
+// --- per-profile backend gate -------------------------------------------------
+
+// Second slice: the backend-missing classifier sits below `WindowBadge`, so it
+// falls outside the pure-function block sliced above.
+const restStart = src.indexOf('function restMissingRoute')
+assert.ok(restStart > 0, 'restMissingRoute slice marker not found')
+let restDepth = 0
+let restEnd = -1
+for (let i = src.indexOf('{', restStart); i < src.length; i += 1) {
+  if (src[i] === '{') restDepth += 1
+  else if (src[i] === '}') {
+    restDepth -= 1
+    if (restDepth === 0) {
+      restEnd = i + 1
+      break
+    }
+  }
+}
+assert.ok(restEnd > restStart, 'restMissingRoute body not closed')
+const restMissingRoute = new Function(`${src.slice(restStart, restEnd)}\nreturn restMissingRoute`)()
+
+test('restMissingRoute recognizes an unmounted plugin backend', () => {
+  // The agent half mounts per profile (plugins.enabled) while the desktop half
+  // is app-level, so this 404 is the ordinary state of a profile that never
+  // enabled the plugin — not a broken key.
+  assert.equal(restMissingRoute(new Error('404: Not Found')), true)
+  assert.equal(restMissingRoute('404: {"detail":"Not Found"}'), true)
+  assert.equal(restMissingRoute(new Error('405: Method Not Allowed')), true)
+})
+
+test('restMissingRoute leaves real faults and working backends alone', () => {
+  assert.equal(restMissingRoute(new Error('401: Unauthorized')), false)
+  assert.equal(restMissingRoute(new Error('500: Internal Server Error')), false)
+  assert.equal(restMissingRoute(new Error('Hermes desktop bridge unavailable')), false)
+  assert.equal(restMissingRoute(undefined), false)
+})
