@@ -10,11 +10,11 @@
  *     ZAI, Alibaba, Arcee) — fetched by the Python backend via `rest('/summary')`.
  *     These need an API key in ~/.hermes/.env.
  *
- *  2. GATEWAY-NATIVE providers (Claude/Anthropic, Codex, Cursor, Kimi,
- *     OpenRouter, Nous) — read DIRECTLY from the gateway RPCs
- *     `account.usage` / `usage.bars`. The gateway already holds their
- *     credentials, so NO API key or backend is needed for these. This mirrors
- *     the technique used by the resetwatch plugin.
+ *  2. GATEWAY-NATIVE providers (Claude/Anthropic, Codex, Nous) — snapshots
+ *     read from this plugin's own backend via `rest('/account_usage')`, which
+ *     queries Hermes' native OAuth credentials (agent.account_usage — the same
+ *     path the CLI /usage command uses). Nous plan bars still come from the
+ *     gateway RPC `usage.bars`. NO API key needed for these.
  *
  * Right-click the chip: "Refresh" / "Configure keys".
  * Left-click opens the configured-providers widget.
@@ -440,8 +440,6 @@ function UsageChip({ rest, storage }) {
   const [panelOpen, setPanelOpen] = useState(false)
   const [anchor, setAnchor] = useState(null)
   const modelSlug = useValue(host.state.model)
-
-
   // Monotonic token: a slow/stalled refresh must never overwrite fresher
   // state written by a later tick or a manual 'Refresh' click.
   const refreshSeq = useRef(0)
@@ -459,13 +457,21 @@ function UsageChip({ rest, storage }) {
       if (stale()) return
       setFetchError(error instanceof Error ? error.message : String(error))
     }
-    // Gateway-native providers — no backend, no keys.
+    // Gateway-native providers — snapshots come from THIS plugin's backend
+    // (`/account_usage`, which reads Hermes' own OAuth credentials via
+    // agent.account_usage); `usage.bars` is a real gateway RPC (Nous bars).
+    // The old `account.usage` RPC never existed server-side — its
+    // METHOD_NOT_FOUND got swallowed below and the Codex/Claude chips were
+    // silently absent. allSettled keeps bars working if the backend is down
+    // (e.g. an OAuth remote where ctx.rest is a no-op).
     try {
-      const [acc, bars] = await Promise.all([
-        host.request('account.usage', {}).catch(() => null),
-        host.request('usage.bars', {}).catch(() => null),
+      const [accRes, barsRes] = await Promise.allSettled([
+        rest ? rest('/account_usage', { method: 'GET', timeoutMs: 20_000 }) : Promise.resolve(null),
+        host.request('usage.bars', {}),
       ])
       if (stale()) return
+      const acc = accRes.status === 'fulfilled' ? accRes.value : null
+      const bars = barsRes.status === 'fulfilled' ? barsRes.value : null
       setGatewayProviders(mapGatewayProviders(acc, bars))
     } catch {
       /* gateway-native data unavailable; key-based providers still work */
