@@ -27,7 +27,10 @@ import json
 import logging
 import math
 import os
-import pwd
+try:  # POSIX-only module; absent on Windows
+    import pwd
+except ImportError:  # pragma: no cover - Windows
+    pwd = None  # type: ignore[assignment]
 import ssl
 import stat
 import time
@@ -68,6 +71,23 @@ _summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
 # --- validated home directory (pitfall 29: never trust raw expanduser) --------
 
+_IS_WINDOWS = os.name == "nt"
+
+
+def _owned_by_us(st) -> bool:
+    """True when the file/dir belongs to the current user.
+
+    POSIX-only check: Windows stat results carry no meaningful ``st_uid`` and
+    ``os.getuid`` does not exist there, so the ownership gate is skipped and
+    Windows' own ACL model governs access instead.
+    """
+    if _IS_WINDOWS:
+        return True
+    try:
+        return st.st_uid == os.getuid()
+    except (AttributeError, OSError):
+        return True
+
 
 def _home_dir() -> str | None:
     """The real home directory: ``$HOME`` when it is absolute and exists, else
@@ -77,9 +97,11 @@ def _home_dir() -> str | None:
     if home and home != "/" and os.path.isabs(home) and os.path.isdir(home):
         return home
     try:
+        if pwd is None:
+            return None
         candidate = pwd.getpwuid(os.getuid()).pw_dir or None
         return candidate if candidate and candidate != "/" else None
-    except (ImportError, KeyError, OSError):
+    except (ImportError, AttributeError, KeyError, OSError):
         return None
 
 
@@ -91,7 +113,7 @@ def _validated_home() -> str | None:
         if os.path.isdir(real):
             try:
                 st = os.stat(real)
-                if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+                if stat.S_ISDIR(st.st_mode) and _owned_by_us(st):
                     return real
             except OSError:
                 pass
@@ -113,9 +135,11 @@ def _check_file_integrity(path: str) -> bool:
         st = os.stat(path)
         if not stat.S_ISREG(st.st_mode):
             return False
-        if st.st_uid != os.getuid():
+        if not _owned_by_us(st):
             return False
-        if st.st_mode & 0o077:  # world- or group-readable/writable
+        # POSIX permission bits only: Windows synthesises st_mode (always
+        # group/world-readable), which would reject every file there.
+        if not _IS_WINDOWS and st.st_mode & 0o077:  # world- or group-readable/writable
             return False
         return True
     except OSError:

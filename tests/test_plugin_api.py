@@ -523,3 +523,63 @@ def test_fetch_deepseek_all_null_totals_is_unexpected_response(monkeypatch):
     fake = {"balance_infos": [{"currency": "CNY", "total_balance": None}]}
     monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
     assert plugin_api._fetch_deepseek("test-key") == {"error": "unexpected-response"}
+
+
+# --- platform portability: the POSIX-only APIs that broke Windows -------------
+
+def test_module_imports_without_the_pwd_module(monkeypatch):
+    # The regression: a module-level `import pwd` raised ImportError on Windows
+    # before any of the guards below could run, so the whole backend failed to
+    # mount and the chip had no data on any provider.
+    import builtins
+
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "pwd":
+            raise ImportError("No module named 'pwd'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    spec = importlib.util.spec_from_file_location(
+        "usage_stats_no_pwd", ROOT / "dashboard" / "plugin_api.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.pwd is None
+    assert module.USAGE_API_URL.endswith("/zen/go/v1/usage")
+    assert any(route.path == "/summary" for route in module.router.routes)
+
+
+def test_home_dir_returns_none_when_pwd_is_unavailable(monkeypatch):
+    monkeypatch.delenv("HOME", raising=False)
+    monkeypatch.setattr(plugin_api, "pwd", None)
+    assert plugin_api._home_dir() is None
+
+
+def test_owned_by_us_skips_the_uid_lookup_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setattr(plugin_api, "_IS_WINDOWS", True)
+    monkeypatch.delattr(os, "getuid", raising=False)
+    assert plugin_api._owned_by_us(os.stat(tmp_path)) is True
+
+
+def test_owned_by_us_tolerates_a_missing_getuid(monkeypatch, tmp_path):
+    monkeypatch.setattr(plugin_api, "_IS_WINDOWS", False)
+    monkeypatch.delattr(os, "getuid", raising=False)
+    assert plugin_api._owned_by_us(os.stat(tmp_path)) is True
+
+
+def test_check_file_integrity_ignores_windows_mode_bits(monkeypatch, tmp_path):
+    # Windows synthesises st_mode (group/world bits always set), so the 0o077
+    # gate rejected every file there and no key ever resolved. The POSIX gate
+    # must still hold on POSIX.
+    config = tmp_path / "config.yaml"
+    config.write_text("model: {}\n", encoding="utf-8")
+    config.chmod(0o666)
+
+    monkeypatch.setattr(plugin_api, "_IS_WINDOWS", True)
+    assert plugin_api._check_file_integrity(str(config)) is True
+
+    monkeypatch.setattr(plugin_api, "_IS_WINDOWS", False)
+    assert plugin_api._check_file_integrity(str(config)) is False
