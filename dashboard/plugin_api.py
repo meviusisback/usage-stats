@@ -686,3 +686,95 @@ def summary() -> dict[str, Any]:
     }
     _summary_cache["summary"] = (time.monotonic(), result)
     return result
+
+
+# --- gateway-native OAuth snapshots (Codex / Claude) ---------------------------
+#
+# The desktop chip used to read these from a gateway RPC named `account.usage`
+# that no Hermes gateway ever registered (absent from the OpenRPC contract), so
+# the `.catch(() => null)` swallowed it and the Codex/Claude chips silently
+# never appeared. Hermes itself already knows how to query these accounts from
+# the OAuth credentials in auth.json — `agent.account_usage.fetch_account_usage`
+# (the same path the CLI's /usage command uses). This route exposes that through
+# the plugin's own backend, in the exact snapshot shape mapGatewayProviders()
+# expects. Fail-open: a provider with no credential or a dead upstream yields
+# no snapshot rather than an error.
+
+ACCOUNT_USAGE_TTL_SECONDS = 45
+_account_usage_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+# Providers Hermes ships an account-usage fetcher for and this chip displays.
+_NATIVE_USAGE_PROVIDERS = ("openai-codex", "anthropic")
+
+
+def _format_reset_local(dt: Any) -> str:
+    """Compact relative reset time, mirroring agent.account_usage._format_reset."""
+    from datetime import datetime, timezone
+
+    if dt is None:
+        return "unknown"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    total_seconds = int((dt - datetime.now(timezone.utc)).total_seconds())
+    if total_seconds <= 0:
+        return "now"
+    hours, rem = divmod(total_seconds, 3600)
+    minutes = rem // 60
+    if hours >= 24:
+        days, hours = divmod(hours, 24)
+        return f"in {days}d {hours}h"
+    return f"in {hours}h {minutes}m" if hours else f"in {minutes}m"
+
+
+def _snapshot_to_dict(snap: Any) -> dict[str, Any]:
+    windows: list[dict[str, Any]] = []
+    for win in snap.windows:
+        windows.append({
+            "label": win.label,
+            "used_percent": win.used_percent,
+            "resetsAt": win.reset_at.isoformat() if win.reset_at else None,
+        })
+    details = list(snap.details)
+    for win in snap.windows:
+        if win.used_percent is not None:
+            details.append(
+                f"{win.label}: {round(win.used_percent)}% used · resets {_format_reset_local(win.reset_at)}"
+            )
+    return {
+        "provider": snap.provider,
+        "plan": snap.plan,
+        "title": snap.title,
+        "windows": windows,
+        "details": details,
+    }
+
+
+@router.get("/account_usage")
+def account_usage() -> dict[str, Any]:
+    """OAuth-provider account limits as `{'snapshots': [...]}`.
+
+    Cached in-memory for ``ACCOUNT_USAGE_TTL_SECONDS``; each snapshot carries
+    provider/plan/windows[{label, used_percent, resetsAt}]/details.
+    """
+    now = time.monotonic()
+    cached = _account_usage_cache.get("account_usage")
+    if cached is not None and (now - cached[0]) < ACCOUNT_USAGE_TTL_SECONDS:
+        return cached[1]
+
+    snapshots: list[dict[str, Any]] = []
+    try:
+        from agent.account_usage import fetch_account_usage
+    except Exception:  # noqa: BLE001 - backend without the agent import: stay inert
+        fetch_account_usage = None  # type: ignore[assignment]
+    if fetch_account_usage is not None:
+        for provider in _NATIVE_USAGE_PROVIDERS:
+            try:
+                snap = fetch_account_usage(provider)
+            except Exception:  # noqa: BLE001
+                snap = None
+            if snap is not None and getattr(snap, "available", False):
+                snapshots.append(_snapshot_to_dict(snap))
+
+    result: dict[str, Any] = {"snapshots": snapshots}
+    _account_usage_cache["account_usage"] = (time.monotonic(), result)
+    return result

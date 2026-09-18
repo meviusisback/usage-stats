@@ -10,11 +10,11 @@
  *     ZAI, Alibaba, Arcee) — fetched by the Python backend via `rest('/summary')`.
  *     These need an API key in ~/.hermes/.env.
  *
- *  2. GATEWAY-NATIVE providers (Claude/Anthropic, Codex, Cursor, Kimi,
- *     OpenRouter, Nous) — read DIRECTLY from the gateway RPCs
- *     `account.usage` / `usage.bars`. The gateway already holds their
- *     credentials, so NO API key or backend is needed for these. This mirrors
- *     the technique used by the resetwatch plugin.
+ *  2. GATEWAY-NATIVE providers (Claude/Anthropic, Codex, Nous) — snapshots
+ *     read from this plugin's own backend via `rest('/account_usage')`, which
+ *     queries Hermes' native OAuth credentials (agent.account_usage — the same
+ *     path the CLI /usage command uses). Nous plan bars still come from the
+ *     gateway RPC `usage.bars`. NO API key needed for these.
  *
  * Right-click the chip: "Refresh" / "Configure keys".
  * Left-click opens the configured-providers widget.
@@ -269,7 +269,7 @@ function WidgetRow({ p, active }) {
   })
 }
 
-// --- Gateway-native: read account.usage / usage.bars (no keys needed) --------
+// --- Gateway-native: read /account_usage (plugin backend) + usage.bars ------
 function mapGatewayProviders(account, bars) {
   const out = []
   const snaps = (account && account.snapshots) || []
@@ -316,6 +316,20 @@ function mapGatewayProviders(account, bars) {
   // emit id 'gw:nous' → duplicate React keys downstream. First one wins.
   const seen = new Set()
   return out.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)))
+}
+
+// A plugin's own backend (`dashboard/plugin_api.py`) mounts ONLY once, at the
+// desktop backend's process start, and ONLY for plugins listed in THAT
+// profile's `plugins.enabled` (GHSA-mcfc-hp25-cjv7). The desktop half, by
+// contrast, is app-level: it renders in every profile. So a profile that never
+// enabled the agent half still draws the chip while every `rest()` here 404s —
+// which used to read as "No keys configured", the wrong diagnosis (the keys are
+// fine; the route does not exist). Classify it so the panel can say so:
+// desktop REST errors carry the legacy "<status>: <body>" message.
+function restMissingRoute(error) {
+  const message = error instanceof Error ? error.message : String(error || '')
+  const status = /^\s*(\d{3})\b/.exec(message)
+  return status !== null && (status[1] === '404' || status[1] === '405')
 }
 
 // --- Config dialog: masked inputs → copy to local clipboard (NEVER network) ---
@@ -434,12 +448,41 @@ function UsageChip({ rest, storage }) {
   const [summary, setSummary] = useState(null)
   const [gatewayProviders, setGatewayProviders] = useState([])
   const [fetchError, setFetchError] = useState(null)
+  const [backendMissing, setBackendMissing] = useState(false)
   const [activeProvider, setActiveProvider] = useState(null)
   const [providerResolved, setProviderResolved] = useState(false)
   const [configOpen, setConfigOpen] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
   const [anchor, setAnchor] = useState(null)
   const modelSlug = useValue(host.state.model)
+  const focusedSid = useValue(host.state.focusedSessionId)
+  const gatewayState = useValue(host.state.gateway)
+  const [liveRoutes, setLiveRoutes] = useState({})
+
+  // Live per-session routes from gateway `session.info` events (payload carries
+  // the session's real {model, provider}). The composer's persisted selection
+  // is PROFILE-GLOBAL and does not move when a model switch is applied to a
+  // live session — use-model-controls paints session-scoped state only, and
+  // session.info is deliberately never reflected into the composer. Upstream
+  // read localStorage and therefore never followed the focused chat.
+  useEffect(() => {
+    const off = host.onEvent('session.info', (event) => {
+      const sid = event?.session_id
+      const info = event?.payload
+      if (!sid || !info || typeof info.provider !== 'string' || !info.provider) return
+      setLiveRoutes((prev) => ({
+        ...prev,
+        [sid]: { provider: info.provider, model: String(info.model || '') },
+      }))
+    })
+    return off
+  }, [])
+
+  // A gateway reconnect invalidates every runtime session id — rebuild from
+  // fresh session.info events instead of trusting stale sid→route entries.
+  useEffect(() => {
+    if (gatewayState && gatewayState !== 'open') setLiveRoutes({})
+  }, [gatewayState])
 
 
   // Monotonic token: a slow/stalled refresh must never overwrite fresher
@@ -448,6 +491,7 @@ function UsageChip({ rest, storage }) {
   const refresh = useCallback(async () => {
     const seq = ++refreshSeq.current
     const stale = () => seq !== refreshSeq.current
+    let routeMissing = false
     try {
       if (rest) {
         const response = await rest('/summary', { method: 'GET', timeoutMs: 20_000 })
@@ -457,38 +501,55 @@ function UsageChip({ rest, storage }) {
       }
     } catch (error) {
       if (stale()) return
+      routeMissing = restMissingRoute(error)
       setFetchError(error instanceof Error ? error.message : String(error))
     }
-    // Gateway-native providers — no backend, no keys.
+    // Gateway-native providers — snapshots come from THIS plugin's backend
+    // (`/account_usage`, which reads Hermes' own OAuth credentials via
+    // agent.account_usage); `usage.bars` is a real gateway RPC (Nous bars).
+    // The old `account.usage` RPC never existed server-side — its
+    // METHOD_NOT_FOUND got swallowed below and the Codex/Claude chips were
+    // silently absent. allSettled keeps bars working if the backend is down
+    // (e.g. an OAuth remote where ctx.rest is a no-op).
     try {
-      const [acc, bars] = await Promise.all([
-        host.request('account.usage', {}).catch(() => null),
-        host.request('usage.bars', {}).catch(() => null),
+      const [accRes, barsRes] = await Promise.allSettled([
+        rest ? rest('/account_usage', { method: 'GET', timeoutMs: 20_000 }) : Promise.resolve(null),
+        host.request('usage.bars', {}),
       ])
       if (stale()) return
+      if (accRes.status === 'rejected' && restMissingRoute(accRes.reason)) routeMissing = true
+      const acc = accRes.status === 'fulfilled' ? accRes.value : null
+      const bars = barsRes.status === 'fulfilled' ? barsRes.value : null
       setGatewayProviders(mapGatewayProviders(acc, bars))
     } catch {
       /* gateway-native data unavailable; key-based providers still work */
     }
+    setBackendMissing(routeMissing)
   }, [rest])
 
-  // Model gate. The composer persists its pick as TWO localStorage entries:
-  // 'hermes.desktop.composer.model' (exposed live via host.state.model) and
-  // 'hermes.desktop.composer.provider' (e.g. 'opencode-go' / 'openrouter').
-  // The provider entry is the authoritative signal — model ids are bare
-  // names ('ox-alpha-free') or vendor-prefixed openrouter ids
-  // ('deepseek/deepseek-v4-pro') whose prefix is NOT the serving provider.
-  // Resolution order: persisted provider → token match on the model id →
-  // backend's configured default. ('config.get' is not a plugin-reachable
-  // RPC; the first version of this gate never resolved because of it.)
+  // Model gate. Resolution order:
+  //   1. the FOCUSED session's live route (session.info events) — a model
+  //      switch applied to a live session never touches the composer's
+  //      localStorage entries, so this is the only signal that follows tabs;
+  //   2. the composer's persisted pick as TWO localStorage entries:
+  //      'hermes.desktop.composer.model' (exposed live via host.state.model)
+  //      and 'hermes.desktop.composer.provider' (e.g. 'opencode-go') — the
+  //      provider entry is authoritative for drafts: model ids are bare
+  //      names ('ox-alpha-free') or vendor-prefixed openrouter ids whose
+  //      prefix is NOT the serving provider;
+  //   3. the backend's configured default. ('config.get' is not a
+  //      plugin-reachable RPC; the first version of this gate never resolved
+  //      because of it.)
   useEffect(() => {
     let cancelled = false
     const resolve = async () => {
+      const live = (focusedSid && liveRoutes[focusedSid]) || null
+      let provider = live ? (providerIdFor(live.provider, '') || providerIdFor(live.model, '')) : null
       let stored = ''
       try {
         stored = window.localStorage.getItem('hermes.desktop.composer.provider') || ''
       } catch { /* localStorage unavailable */ }
-      let provider = providerIdFor(stored, '') || providerIdFor(modelSlug, '')
+      if (!provider) provider = providerIdFor(stored, '') || providerIdFor(modelSlug, '')
       if (!provider && rest) {
         try {
           const res = await rest('/active_provider', { method: 'GET', timeoutMs: 10_000 })
@@ -503,7 +564,7 @@ function UsageChip({ rest, storage }) {
     }
     void resolve()
     return () => { cancelled = true }
-  }, [modelSlug, rest])
+  }, [modelSlug, rest, focusedSid, liveRoutes])
 
 
   useEffect(() => {
@@ -601,7 +662,9 @@ function UsageChip({ rest, storage }) {
         ? jsx('div', {
             key: 'empty',
             style: { padding: '8px 6px', fontSize: 11, color: 'var(--ui-text-tertiary)' },
-            children: 'No keys configured — right-click → Configure keys',
+            children: backendMissing
+              ? "This profile hasn't enabled the plugin's backend — add \"usage-stats\" to its plugins.enabled, then restart Hermes"
+              : 'No keys configured — right-click → Configure keys',
           })
         : jsx('div', {
             key: 'rows',
