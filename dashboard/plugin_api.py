@@ -39,7 +39,19 @@ from typing import Any, Callable
 
 from fastapi import APIRouter
 
-import yaml
+# `yaml` is used once, to read the agent's `config.yaml` for
+# `_configured_provider`.  PyYAML is NOT in the Hermes runtime venv, so an
+# unconditional `import yaml` fails module import and silently unmounts every
+# route (issue #4).  Prefer the `hermes_yaml` shim the runtime always ships
+# (identical `safe_load` API), fall back to PyYAML for standalone/dev use,
+# and degrade to "unknown provider" when neither exists.
+try:
+    import hermes_yaml as yaml
+except ImportError:
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -566,7 +578,11 @@ def _configured_provider() -> str | None:
 
     The Desktop composer reports a bare model id ('ox-alpha-free') with no
     provider hint, so the chip asks the backend which provider serves it.
+    Returns None when no YAML parser is available — the desktop treats that
+    as "no active highlight", never an error.
     """
+    if yaml is None:
+        return None
     home = _validated_home()
     if not home:
         return None
