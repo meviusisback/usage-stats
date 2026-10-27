@@ -69,6 +69,8 @@ def test_health_route_is_mounted_at_the_desktop_namespace(monkeypatch):
 
 
 def test_active_provider_resolves_from_config_yaml(monkeypatch, tmp_path):
+    if plugin_api.yaml is None:
+        pytest.skip("no YAML parser installed in this environment")
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "model:\n  default: ox-alpha-free\n  provider: opencode-go\n"
@@ -523,3 +525,79 @@ def test_fetch_deepseek_all_null_totals_is_unexpected_response(monkeypatch):
     fake = {"balance_infos": [{"currency": "CNY", "total_balance": None}]}
     monkeypatch.setattr(plugin_api, "_request_json", lambda url, key: fake)
     assert plugin_api._fetch_deepseek("test-key") == {"error": "unexpected-response"}
+
+# --- issue #4: module must load with no YAML parser at all ------------------
+
+def _load_plugin_api_without_yaml_modules(monkeypatch):
+    """Re-import plugin_api.py with every YAML provider blocked.
+
+    Simulates the Hermes runtime venv (no PyYAML, and hermes_yaml shadowed):
+    removes both names from sys.modules and makes any import attempt fail.
+    Returns the freshly-loaded module.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+    blocked = {"yaml", "hermes_yaml"}
+
+    def fake_import(name, *args, **kwargs):
+        if name in blocked or name.split(".")[0] in blocked:
+            raise ImportError(f"No module named {name!r} (blocked by test)")
+        return real_import(name, *args, **kwargs)
+
+    for name in blocked:
+        monkeypatch.delitem(sys.modules, name, raising=False)
+    # A globally-installed PyYAML must not leak through either: fail the
+    # import machinery itself (mock.patch.dict on sys.modules is bypassed
+    # because `import yaml` consults the real finder first).
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    module_name = "usage_stats_no_yaml_plugin_api"
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / "dashboard" / "plugin_api.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_module_imports_with_no_yaml_parser(monkeypatch):
+    # Issue #4: unconditional `import yaml` failed module import on a stock
+    # runtime, silently unmounting every route.  Import must succeed and the
+    # router must carry all routes even when nothing YAML-shaped exists.
+    module = _load_plugin_api_without_yaml_modules(monkeypatch)
+
+    assert module.yaml is None
+    paths = {route.path for route in module.router.routes}
+    assert {"/health", "/usage", "/summary", "/active_provider"} <= paths
+
+
+def test_active_provider_returns_null_with_no_yaml_parser(monkeypatch, tmp_path):
+    # Without a parser the backend cannot read config.yaml: the endpoint
+    # degrades to null (desktop shows no active highlight), never a 500.
+    module = _load_plugin_api_without_yaml_modules(monkeypatch)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  default: ox-alpha-free\n  provider: opencode-go\n",
+        encoding="utf-8",
+    )
+    os.chmod(config_path, 0o600)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    app = FastAPI()
+    app.include_router(module.router, prefix="/api/plugins/usage-stats")
+    response = TestClient(app).get("/api/plugins/usage-stats/active_provider")
+
+    assert response.status_code == 200
+    assert response.json() == {"provider": None}
+
+
+def test_active_provider_still_resolves_when_yaml_present(monkeypatch):
+    # Sanity anchor for the fallback chain: in THIS test process PyYAML (or
+    # the shim, in the real runtime) exists, so module-level `yaml` is bound
+    # and exposes the safe_load API the backend needs.
+    if plugin_api.yaml is None:
+        pytest.skip("no YAML parser installed in this environment")
+    assert callable(plugin_api.yaml.safe_load)
