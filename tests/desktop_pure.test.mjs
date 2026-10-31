@@ -20,8 +20,8 @@ const start = src.indexOf('// Map a model config')
 const end = src.indexOf('function WindowBadge')
 assert.ok(start > 0 && end > start, 'pure-function slice markers not found')
 
-const factory = new Function(`${src.slice(start, end)}\nreturn { providerIdFor, resetCountdown, widgetProviders, windowParts }`)
-const { providerIdFor, resetCountdown, widgetProviders, windowParts } = factory()
+const factory = new Function(`${src.slice(start, end)}\nreturn { providerIdFor, persistedComposerProvider, resetCountdown, widgetProviders, windowParts }`)
+const { providerIdFor, persistedComposerProvider, resetCountdown, widgetProviders, windowParts } = factory()
 
 const minutesFromNow = (m) => new Date(Date.now() + m * 60_000).toISOString()
 
@@ -135,4 +135,67 @@ test('plugin.js parses as strict ESM under loader-style rewriting', async () => 
 test('widgetProviders tolerates missing payload', () => {
   assert.deepEqual(widgetProviders(undefined), [])
   assert.deepEqual(widgetProviders(null), [])
+})
+
+// --- model gate: the composer pick lives under a SCOPED key -------------------
+
+/** Minimal localStorage double (the Desktop renderer's storage is not in scope
+ *  here — plugin.js is sliced, not imported). */
+const fakeStorage = (entries) => {
+  const store = new Map(Object.entries(entries))
+
+  return {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    key: (i) => [...store.keys()][i] ?? null,
+    get length() {
+      return store.size
+    },
+  }
+}
+
+test('persistedComposerProvider reads the scoped composer provider key', () => {
+  // Current builds write '<key>.registry.<connection>.<profile>' and no longer
+  // write the bare key; reading only the bare key left the gate to
+  // substring-match the model id, which routes OpenCode-served 'deepseek-*' /
+  // 'glm-*' / 'kimi-*' models to a provider the user has no key for.
+  const storage = fakeStorage({
+    'hermes.desktop.composer.model.registry.local.default': 'deepseek-v4.1-flash',
+    'hermes.desktop.composer.provider.registry.local.default': 'opencode-go',
+  })
+
+  assert.equal(persistedComposerProvider(storage), 'opencode-go')
+  assert.equal(providerIdFor(persistedComposerProvider(storage), ''), 'opencode')
+})
+
+test('persistedComposerProvider prefers the bare legacy key when present', () => {
+  const storage = fakeStorage({
+    'hermes.desktop.composer.provider': 'openrouter',
+    'hermes.desktop.composer.provider.registry.local.default': 'opencode-go',
+  })
+
+  assert.equal(persistedComposerProvider(storage), 'openrouter')
+})
+
+test('persistedComposerProvider ignores empty scoped values and unrelated keys', () => {
+  const storage = fakeStorage({
+    'hermes.desktop.composer.model.registry.local.default': 'deepseek-v4.1-flash',
+    'hermes.desktop.composer.provider.registry.local.default': '',
+  })
+
+  assert.equal(persistedComposerProvider(storage), '')
+})
+
+test('persistedComposerProvider degrades to empty without a usable storage', () => {
+  assert.equal(persistedComposerProvider(undefined), '')
+  assert.equal(persistedComposerProvider(null), '')
+  assert.equal(
+    persistedComposerProvider({
+      getItem: () => {
+        throw new Error('blocked')
+      },
+      key: () => null,
+      length: 0,
+    }),
+    ''
+  )
 })
