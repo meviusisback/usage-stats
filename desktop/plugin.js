@@ -51,15 +51,14 @@ const KEY_SPECS = [
   { id: 'arcee', name: 'Arcee AI', autoKey: 'ARCEE_API_KEY', altKeys: [] },
 ]
 
-// Gateway-native provider slugs (from account.usage / config) → display info.
-// These are read without any API key (the gateway holds the credentials).
+// Gateway-native provider slugs → display info. Only slugs a real data path
+// can emit (audit M1): /account_usage serves openai-codex + anthropic, and
+// usage.bars yields nous. Cursor/Kimi/OpenRouter have no snapshot path, so
+// listing them here would advertise chips that can never render.
 const GATEWAY_PROVIDERS = {
   anthropic: { display: 'CL', name: 'Claude' },
   'openai-codex': { display: 'CX', name: 'Codex' },
   codex: { display: 'CX', name: 'Codex' },
-  cursor: { display: 'CU', name: 'Cursor' },
-  kimi: { display: 'KI', name: 'Kimi' },
-  openrouter: { display: 'OR', name: 'OpenRouter' },
   nous: { display: 'NO', name: 'Nous' },
 }
 
@@ -270,6 +269,16 @@ function WidgetRow({ p, active }) {
 }
 
 // --- Gateway-native: read /account_usage (plugin backend) + usage.bars ------
+// Audit L6: snapshot/bars strings come from OAuth/gateway upstreams, so they
+// are sanitized at this boundary — coerced, control-stripped, truncated —
+// before reaching widget rows, tooltips, or React keys. React escaping blocks
+// XSS; this blocks layout distortion, bidi spoofing, and key collisions.
+function cleanGatewayText(value, maxLen, fallback) {
+  const s = String(value ?? '').replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '').trim()
+  if (!s) return fallback
+  return s.length > maxLen ? s.slice(0, maxLen) : s
+}
+
 function mapGatewayProviders(account, bars) {
   const out = []
   const snaps = (account && account.snapshots) || []
@@ -278,12 +287,16 @@ function mapGatewayProviders(account, bars) {
     if (!slug) continue
     const info = GATEWAY_PROVIDERS[String(slug).toLowerCase()]
     if (!info) continue
-    const windows = (snap.windows || []).map((win) => ({
-      id: String(win.label || '').toLowerCase(),
-      label: win.label,
-      percent: typeof win.used_percent === 'number' ? win.used_percent : (typeof win.remaining_percent === 'number' ? 100 - win.remaining_percent : null),
-    }))
+    const windows = (snap.windows || []).map((win, i) => {
+      const label = cleanGatewayText(win.label, 24, `Window ${i + 1}`)
+      return {
+        id: `${String(slug).toLowerCase()}-w${i}-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
+        label,
+        percent: typeof win.used_percent === 'number' ? win.used_percent : (typeof win.remaining_percent === 'number' ? 100 - win.remaining_percent : null),
+      }
+    })
     const first = windows[0]
+    const detail = cleanGatewayText((snap.details || []).join(' · '), 200, `${info.name} usage`)
     out.push({
       id: 'gw:' + slug,
       gatewaySlug: slug,
@@ -292,7 +305,7 @@ function mapGatewayProviders(account, bars) {
       kind: windows.length ? 'percent' : 'note',
       label: first ? `${Math.round(first.percent)}%` : '—',
       value: first ? first.percent : null,
-      detail: (snap.details || []).join(' · ') || `${info.name} usage`,
+      detail,
       windows,
       error: null,
     })
@@ -307,7 +320,7 @@ function mapGatewayProviders(account, bars) {
       kind: 'percent',
       label: rem != null ? `${Math.round(rem)}%` : '—',
       value: rem,
-      detail: bars.subscription_remaining_display || 'Nous Portal credits',
+      detail: cleanGatewayText(bars.subscription_remaining_display, 200, 'Nous Portal credits'),
       windows: [],
       error: null,
     })
@@ -725,7 +738,7 @@ function UsageChip({ rest, storage }) {
 export default {
   id: ID,
   name: 'Usage Stats',
-  description: 'Usage & balance for the active model’s provider (OC, OR, DS, KI, NV, Z, AB, AR, + gateway-native Claude/Codex/Cursor/Nous).',
+  description: 'Usage & balance for the active model’s provider (OC, OR, DS, KI, NV, Z, AB, AR, + gateway-native Claude/Codex/Nous).',
   defaultEnabled: false,
   register(ctx) {
     ctx.register({

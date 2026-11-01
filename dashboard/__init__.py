@@ -1,1 +1,1 @@
-# opencode_usage dashboard backend
+# usage_stats dashboard backend

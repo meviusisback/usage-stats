@@ -10,6 +10,7 @@ import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -20,6 +21,15 @@ assert SPEC and SPEC.loader
 plugin_api = importlib.util.module_from_spec(SPEC)
 sys.modules[MODULE_NAME] = plugin_api
 SPEC.loader.exec_module(plugin_api)
+
+
+@pytest.fixture(autouse=True)
+def _reset_account_usage_cache():
+    """`/account_usage` caches for 45s; without this the first test's
+    response leaks into every later /account_usage test."""
+    plugin_api._account_usage_cache.clear()
+    yield
+    plugin_api._account_usage_cache.clear()
 
 
 def make_client():
@@ -47,7 +57,8 @@ class FakeSnapshot:
 
 def install_fake_fetcher(monkeypatch, snapshots):
     """Inject a fake agent.account_usage module whose fetch returns *snapshots*
-    per provider slug, and report which slugs were asked."""
+    per provider slug, and report which slugs were asked.  Scoped through
+    ``monkeypatch`` so the stub never leaks into other test modules."""
     calls = []
 
     def fetch(provider, *, base_url=None, api_key=None):
@@ -58,10 +69,21 @@ def install_fake_fetcher(monkeypatch, snapshots):
     # at call time inside the route — a stub module in sys.modules satisfies it.
     fake = types.ModuleType("agent.account_usage")
     setattr(fake, "fetch_account_usage", fetch)
-    sys.modules.setdefault("agent", types.ModuleType("agent"))
-    sys.modules["agent.account_usage"] = fake
+    if "agent" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.account_usage", fake)
     plugin_api._account_usage_cache.clear()
     return calls
+
+
+def install_fake_fetcher_fn(monkeypatch, fetch):
+    """Same, but with a caller-supplied fetch function (raising fakes)."""
+    fake = types.ModuleType("agent.account_usage")
+    setattr(fake, "fetch_account_usage", fetch)
+    if "agent" not in sys.modules:
+        monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.account_usage", fake)
+    plugin_api._account_usage_cache.clear()
 
 
 def _codex_snapshot():
@@ -99,11 +121,7 @@ def test_account_usage_skips_unavailable_and_raising_providers(monkeypatch):
             raise RuntimeError("upstream exploded")
         return None  # no credential → Hermes fetcher returns None
 
-    fake = types.ModuleType("agent.account_usage")
-    setattr(fake, "fetch_account_usage", raise_fetcher)
-    sys.modules.setdefault("agent", types.ModuleType("agent"))
-    sys.modules["agent.account_usage"] = fake
-    plugin_api._account_usage_cache.clear()
+    install_fake_fetcher_fn(monkeypatch, raise_fetcher)
 
     response = make_client().get("/api/plugins/usage-stats/account_usage")
 
@@ -129,5 +147,88 @@ def test_account_usage_is_cached_for_45s(monkeypatch):
     second = client.get("/api/plugins/usage-stats/account_usage").json()
 
     assert first == second
-    # two providers probed once each; second request served purely from cache
-    assert calls == ["openai-codex", "anthropic"]
+    # two providers probed once each (parallel fetch: order not guaranteed);
+    # second request served purely from cache
+    assert sorted(calls) == ["anthropic", "openai-codex"]
+
+
+def test_account_usage_cache_expires_after_ttl(monkeypatch):
+    install_fake_fetcher(monkeypatch, {"openai-codex": _codex_snapshot()})
+    client = make_client()
+    client.get("/api/plugins/usage-stats/account_usage")
+
+    # rewind the cache entry past the TTL → next request re-fetches
+    (stamp, payload) = plugin_api._account_usage_cache["account_usage"]
+    plugin_api._account_usage_cache["account_usage"] = (
+        stamp - plugin_api.ACCOUNT_USAGE_TTL_SECONDS - 1, payload)
+
+    calls2 = install_fake_fetcher(monkeypatch, {"openai-codex": _codex_snapshot()})
+    client.get("/api/plugins/usage-stats/account_usage")
+    assert sorted(calls2) == ["anthropic", "openai-codex"]
+
+
+def test_account_usage_clamps_nonfinite_percents(monkeypatch):
+    import math
+
+    reset = datetime.now(timezone.utc) + timedelta(hours=4)
+    snap = FakeSnapshot("openai-codex", [
+        FakeWindow("Session", float("inf"), reset),
+        FakeWindow("Weekly", float("nan"), reset),
+        FakeWindow("Typed", "12.5", reset),  # numeric strings still coerce
+    ], details=(), plan="Plus")
+    install_fake_fetcher(monkeypatch, {"openai-codex": snap})
+
+    response = make_client().get("/api/plugins/usage-stats/account_usage")
+
+    assert response.status_code == 200  # audit L1: no 500 on hostile percents
+    [out] = response.json()["snapshots"]
+    assert [w["used_percent"] for w in out["windows"]] == [None, None, 12.5]
+    # only the finite window earns a summary line
+    assert len(out["details"]) == 1 and "Typed" in out["details"][0]
+
+
+def test_account_usage_skips_malformed_snapshot_keeps_healthy(monkeypatch):
+    class BadSnapshot:
+        # hostile shape: attribute access itself explodes, so conversion
+        # must fail inside the per-provider guard — never as a route 500.
+        provider = "anthropic"
+        available = True
+
+        @property
+        def windows(self):
+            raise TypeError("hostile windows")
+
+        details = ()
+        plan = None
+        title = "t"
+
+    install_fake_fetcher(monkeypatch, {
+        "openai-codex": _codex_snapshot(),
+        "anthropic": BadSnapshot(),
+    })
+
+    response = make_client().get("/api/plugins/usage-stats/account_usage")
+
+    # audit L1: malformed provider skipped, healthy snapshot survives
+    assert response.status_code == 200
+    assert [s["provider"] for s in response.json()["snapshots"]] == ["openai-codex"]
+
+
+def test_account_usage_serves_stale_cache_when_poll_fails(monkeypatch):
+    install_fake_fetcher(monkeypatch, {"openai-codex": _codex_snapshot()})
+    client = make_client()
+    first = client.get("/api/plugins/usage-stats/account_usage").json()
+    assert len(first["snapshots"]) == 1
+
+    def fail_all(provider, *, base_url=None, api_key=None):
+        raise RuntimeError("upstream down")
+
+    # install the failing fetcher first (it clears the cache), then restore
+    # the good payload as an EXPIRED entry → poll fails, stale entry served
+    install_fake_fetcher_fn(monkeypatch, fail_all)
+    import time
+
+    plugin_api._account_usage_cache["account_usage"] = (
+        time.monotonic() - plugin_api.ACCOUNT_USAGE_TTL_SECONDS - 1, first)
+    second = client.get("/api/plugins/usage-stats/account_usage").json()
+    assert second == first

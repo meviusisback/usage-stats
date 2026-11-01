@@ -2,7 +2,7 @@
 
 # usage-stats
 
-**Your model spend, in the Hermes status bar.** One chip shows the usage or balance of the provider behind your active model — OpenCode, OpenRouter, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, plus gateway-native Claude, Codex, Cursor and Nous.
+**Your model spend, in the Hermes status bar.** One chip shows the usage or balance of the provider behind your active model — OpenCode, OpenRouter, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee, plus gateway-native Claude, Codex and Nous.
 
 [![License: MIT](https://img.shields.io/github/license/meviusisback/usage-stats)](LICENSE)
 ![Linux](https://img.shields.io/badge/linux-supported-1793d1)
@@ -107,7 +107,8 @@ Two coordinated halves: `desktop/plugin.js` (status-bar chip) and `dashboard/plu
 | Source | Providers | Needs a key? | Mechanism |
 |--------|-----------|--------------|-----------|
 | **Key-based** (Python backend) | OpenCode Go/Zen, OpenRouter, DeepSeek, Kimi, NovitaAI, ZAI, Alibaba, Arcee | ✅ yes (`.env`) | `rest('/summary')` → backend calls each vendor API |
-| **Gateway-native** (no backend) | Claude/Anthropic, Codex, Cursor, Kimi, OpenRouter, Nous | ❌ no | Reads `account.usage` / `usage.bars` RPCs directly |
+| **Gateway-native** (plugin backend) | Claude/Anthropic, Codex | ❌ no | `rest('/account_usage')` → backend reads Hermes' OAuth credentials (`agent.account_usage`) |
+| **Gateway-native** (gateway RPC) | Nous | ❌ no | `usage.bars` RPC directly (with `rest` fallback via `Promise.allSettled`) |
 
 | Display | Provider | Metric |
 |---------|----------|--------|
@@ -119,8 +120,11 @@ Two coordinated halves: `desktop/plugin.js` (status-bar chip) and `dashboard/plu
 | `Z`  | ZAI / Zhipu | CNY balance |
 | `AB` | Alibaba / DashScope | CNY usage |
 | `AR` | Arcee AI | USD balance |
+| `CL` | Claude / Anthropic (gateway-native) | % used + reset time |
+| `CX` | Codex (gateway-native) | % used + reset time |
+| `NO` | Nous Portal (gateway-native) | credits remaining |
 
-Not supported (no public usage/balance API): Anthropic, OpenAI, Fireworks, xAI, NVIDIA NIM, Gemini, Minimax, StepFun, Tencent, Xiaomi, Nous, Ollama, LM Studio, GitHub Copilot, Bedrock, Vertex, Azure, CommandCode, and all OAuth/local providers. These return `null` in the chip but never crash it.
+Not supported (no public usage/balance API): OpenAI, Fireworks, xAI, NVIDIA NIM, Gemini, Minimax, StepFun, Tencent, Xiaomi, Ollama, LM Studio, GitHub Copilot, Bedrock, Vertex, Azure, CommandCode, Cursor, and all other OAuth/local providers. These return `null` in the chip but never crash it.
 
 Verify the backend after install: `GET /api/plugins/usage-stats/health` → `{"status":"ok","api_key_configured":true}`, and `GET /api/plugins/usage-stats/summary` for all providers. If the chip reports `404: {"detail":"Plugin not found"}`, check the repo is complete at `$HERMES_HOME/plugins/usage-stats`, `dashboard/manifest.json` exists, `usage-stats` is in `plugins.enabled`, the backend was restarted, and Desktop and backend use the same profile.
 

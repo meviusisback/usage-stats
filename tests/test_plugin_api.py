@@ -662,3 +662,111 @@ def test_active_provider_still_resolves_when_yaml_present(monkeypatch):
     if plugin_api.yaml is None:
         pytest.skip("no YAML parser installed in this environment")
     assert callable(plugin_api.yaml.safe_load)
+
+
+# --- audit L11/L12 + L2: guards must fail closed and stay pinned ------------
+
+def test_request_json_rejects_oversized_bodies(monkeypatch):
+    # L11: MAX_RESPONSE_BYTES must be enforced before json.loads — an
+    # upstream returning past the cap maps to unexpected-response, and this
+    # test fails if the guard is ever deleted.
+    class FatResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, n=-1):
+            return b"x" * (plugin_api.MAX_RESPONSE_BYTES + 1)
+
+    monkeypatch.setattr(plugin_api._OPENER, "open", lambda req, timeout=None: FatResponse())
+
+    try:
+        plugin_api._request_json("https://example.invalid/x", "k")
+    except Exception as exc:
+        assert plugin_api._transport_error(exc) == "unexpected-response"
+    else:
+        raise AssertionError("oversized body must raise")
+
+
+def test_check_file_integrity_rejects_world_readable_symlink_and_dir(monkeypatch, tmp_path):
+    # L12: negative cases for the config gate — group/world bits, symlinks,
+    # and non-regular files must all fail closed (POSIX semantics).
+    if plugin_api._IS_WINDOWS:
+        pytest.skip("POSIX permission-gate semantics")
+    monkeypatch.setattr(plugin_api, "_IS_WINDOWS", False)
+
+    world = tmp_path / "world.yaml"
+    world.write_text("model: {}\n", encoding="utf-8")
+    world.chmod(0o644)
+    assert plugin_api._check_file_integrity(str(world)) is False
+
+    target = tmp_path / "target.yaml"
+    target.write_text("model: {}\n", encoding="utf-8")
+    target.chmod(0o600)
+    link = tmp_path / "link.yaml"
+    link.symlink_to(target)
+    assert plugin_api._check_file_integrity(str(link)) is False
+
+    assert plugin_api._check_file_integrity(str(tmp_path)) is False
+
+
+def test_active_provider_rejects_world_readable_config(monkeypatch, tmp_path):
+    # End-to-end half of L12: a tampered-permission config.yaml yields null,
+    # never a provider id.
+    if plugin_api._IS_WINDOWS:
+        pytest.skip("POSIX permission-gate semantics")
+    monkeypatch.setattr(plugin_api, "_IS_WINDOWS", False)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("model:\n  provider: opencode-go\n", encoding="utf-8")
+    os.chmod(config_path, 0o644)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    body = make_client().get("/api/plugins/usage-stats/active_provider").json()
+
+    assert body == {"provider": None}
+
+
+def test_configured_provider_rejects_oversized_config(monkeypatch, tmp_path):
+    # Audit L3: an oversized config.yaml is refused before YAML parsing, so
+    # anchor-expansion bombs never reach safe_load.
+    if plugin_api.yaml is None:
+        pytest.skip("no YAML parser installed in this environment")
+    config_path = tmp_path / "config.yaml"
+    with open(config_path, "w", encoding="utf-8") as handle:
+        handle.write("model:\n  provider: opencode-go\n")
+        handle.write("#" * (plugin_api.MAX_CONFIG_BYTES + 1))
+    os.chmod(config_path, 0o600)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    assert plugin_api._configured_provider() is None
+
+
+def test_validated_home_rejects_untrusted_home_dirs(monkeypatch, tmp_path):
+    # Audit L5: every home branch applies the same trust predicate — a
+    # nonexistent HERMES_HOME falls through, and a file (not dir) is refused.
+    monkeypatch.delenv("HERMES_HOME", raising=False)
+    not_a_dir = tmp_path / "file-home"
+    not_a_dir.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("HERMES_HOME", str(not_a_dir))
+    monkeypatch.setenv("HOME", str(tmp_path / "no-such-dir"))
+    monkeypatch.setattr(plugin_api.pwd, "getpwuid", lambda uid: (_ for _ in ()).throw(KeyError(uid)))
+
+    assert plugin_api._validated_home() is None
+
+
+def test_summary_isolates_a_broken_provider_spec(monkeypatch):
+    # Audit L2: an exception escaping _fetch_one (bad spec) becomes one
+    # per-provider error entry — never a 500 for every provider.
+    specs = list(plugin_api.PROVIDER_SPECS)
+    broken = [dict(specs[0])]
+    del broken[0]["name"]  # KeyError inside _fetch_one, before the fetch try
+    monkeypatch.setattr(plugin_api, "PROVIDER_SPECS", broken)
+
+    response = make_client().get("/api/plugins/usage-stats/summary")
+
+    assert response.status_code == 200
+    [entry] = response.json()["providers"]
+    assert entry["id"] == specs[0]["id"]
+    assert entry["error"] == "unknown-error"

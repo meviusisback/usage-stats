@@ -208,6 +208,54 @@ test('mapGatewayProviders degrades cleanly on empty or missing payloads', () => 
   assert.deepEqual(mapGatewayProviders({ snapshots: [{ provider: 'gemini', windows: [] }] }, null), [])
 })
 
+test('mapGatewayProviders sanitizes hostile upstream strings', () => {
+  // Audit L6: OAuth/gateway strings are coerced, control-stripped, and
+  // truncated at the mapping boundary; window ids stay unique even when
+  // upstream labels collide or vanish.
+  const account = {
+    snapshots: [{
+      provider: 'openai-codex',
+      windows: [
+        { label: 'Ses\u0000sion\u202e', used_percent: 8.0 },
+        { label: 'Session', used_percent: 9.0 },
+        { label: '', used_percent: 10.0 },
+        { label: 'x'.repeat(100), used_percent: 11.0 },
+      ],
+      details: ['A'.repeat(500)],
+    }],
+  }
+  const [chip] = mapGatewayProviders(account, null)
+  const labels = chip.windows.map((w) => w.label)
+  assert.deepEqual(labels, ['Session', 'Session', 'Window 3', 'x'.repeat(24)])
+  assert.ok(!labels.some((l) => /[\u0000-\u001f\u202e]/.test(l)))
+  const ids = chip.windows.map((w) => w.id)
+  assert.equal(new Set(ids).size, ids.length)
+  assert.equal(chip.detail.length, 200)
+})
+
+test('mapGatewayProviders truncates hostile bars display text', () => {
+  const bars = {
+    plan_bar: { pct_used: 30 },
+    subscription_remaining_display: 'B'.repeat(500),
+  }
+  const [chip] = mapGatewayProviders(null, bars)
+  assert.equal(chip.id, 'gw:nous')
+  assert.equal(chip.detail.length, 200)
+})
+
+test('mapGatewayProviders never emits unreachable provider slugs', () => {
+  // Audit M1: Cursor/Kimi/OpenRouter have no snapshot path — a snapshot
+  // claiming those slugs must not render.
+  const account = {
+    snapshots: [
+      { provider: 'cursor', windows: [{ label: 'W', used_percent: 1 }] },
+      { provider: 'kimi', windows: [{ label: 'W', used_percent: 1 }] },
+      { provider: 'openrouter', windows: [{ label: 'W', used_percent: 1 }] },
+    ],
+  }
+  assert.deepEqual(mapGatewayProviders(account, null), [])
+})
+
 // --- per-profile backend gate -------------------------------------------------
 
 // Second slice: the backend-missing classifier sits below `WindowBadge`, so it
