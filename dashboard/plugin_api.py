@@ -1,7 +1,7 @@
 """Usage Stats → multi-provider usage/balance for the Hermes desktop plugin.
 
 Hermes discovers this file through ``dashboard/manifest.json`` and mounts the
-module-level FastAPI ``router`` under ``/api/plugins/opencode-usage``.
+module-level FastAPI ``router`` under ``/api/plugins/usage-stats``.
 
 Endpoints
 ---------
@@ -69,6 +69,7 @@ ALIBABA_BILLING_URL = "https://dashscope.aliyuncs.com/api/v1/services/billing/us
 ARCEE_BALANCE_URL = "https://api.arcee.ai/v2/user/balance"
 TIMEOUT_SECONDS = 15
 MAX_RESPONSE_BYTES = 4096
+MAX_CONFIG_BYTES = 1 << 20  # audit L3: config.yaml parsed with a size cap
 USER_AGENT = "Mozilla/5.0 (Hermes-Agent; usage-stats)"
 WINDOWS = [
     {"id": "rolling", "label": "5h"},
@@ -101,13 +102,38 @@ def _owned_by_us(st) -> bool:
         return True
 
 
+def _trusted_dir(path: str) -> str | None:
+    """``realpath`` of a directory we may resolve config under, else None.
+
+    Single trust predicate for every home branch (audit L5): the resolved
+    path must be a directory owned by us.  Symlink and ancestor checks are
+    subsumed by ``realpath`` + ownership — a redirected path fails the
+    ownership gate unless the attacker already runs as us.
+    """
+    if not path:
+        return None  # realpath("") is the cwd — never trust an empty path
+    try:
+        real = os.path.realpath(path)
+        if not os.path.isdir(real):
+            return None
+        st = os.stat(real)
+        if not stat.S_ISDIR(st.st_mode) or not _owned_by_us(st):
+            return None
+        return real
+    except OSError:
+        return None
+
+
 def _home_dir() -> str | None:
-    """The real home directory: ``$HOME`` when it is absolute and exists, else
-    the passwd entry.  ``os.path.expanduser("~")`` returns ``/`` for an empty
-    ``HOME``, which would silently relocate every config path."""
-    home = os.environ.get("HOME", "")
-    if home and home != "/" and os.path.isabs(home) and os.path.isdir(home):
-        return home
+    """The real home directory: ``$HOME`` when trusted, else the passwd entry.
+
+    ``os.path.expanduser("~")`` returns ``/`` for an empty ``HOME``, which
+    would silently relocate every config path — so an untrusted ``$HOME`` is
+    ignored entirely rather than used raw.
+    """
+    trusted = _trusted_dir(os.environ.get("HOME", ""))
+    if trusted is not None and trusted != "/":
+        return trusted
     try:
         if pwd is None:
             return None
@@ -119,22 +145,12 @@ def _home_dir() -> str | None:
 
 def _validated_home() -> str | None:
     """HERMES_HOME when it exists and is trustworthy, else a validated fallback."""
-    hermes_home = os.environ.get("HERMES_HOME", "")
-    if hermes_home:
-        real = os.path.realpath(hermes_home)
-        if os.path.isdir(real):
-            try:
-                st = os.stat(real)
-                if stat.S_ISDIR(st.st_mode) and _owned_by_us(st):
-                    return real
-            except OSError:
-                pass
+    trusted = _trusted_dir(os.environ.get("HERMES_HOME", ""))
+    if trusted is not None:
+        return trusted
     base = _home_dir()
     if base:
-        candidate = os.path.join(base, ".hermes")
-        real = os.path.realpath(candidate)
-        if os.path.isdir(real):
-            return real
+        return _trusted_dir(os.path.join(base, ".hermes"))
     return None
 
 
@@ -614,7 +630,10 @@ def _configured_provider() -> str | None:
     if not _check_file_integrity(config_path):
         return None
     with open(config_path, encoding="utf-8") as handle:
-        config = yaml.safe_load(handle) or {}
+        text = handle.read(MAX_CONFIG_BYTES + 1)
+    if len(text) > MAX_CONFIG_BYTES:
+        return None
+    config = yaml.safe_load(text) or {}
     model_config = config.get("model") or {}
     return (
         _provider_id_for(model_config.get("provider"))
@@ -715,14 +734,163 @@ def summary() -> dict[str, Any]:
         }
         for future in as_completed(futures):
             idx = futures[future]
-            providers[idx] = future.result()
+            spec = PROVIDER_SPECS[idx]
+            try:
+                providers[idx] = future.result()
+            except Exception as exc:  # noqa: BLE001 - audit L2: one bad spec must not 500 all providers
+                logger.warning("Provider %s entry failed", spec.get("id"), exc_info=True)
+                providers[idx] = {
+                    "id": spec.get("id"),
+                    "name": spec.get("name"),
+                    "display": spec.get("display"),
+                    "kind": None,
+                    "label": None,
+                    "value": None,
+                    "detail": None,
+                    "error": _transport_error(exc),
+                }
 
     result: dict[str, Any] = {
         "providers": providers,
         "apiKeyConfigured": {
-            spec["id"]: any(_read_key(env) for env in spec["key_envs"])
+            spec.get("id"): any(_read_key(env) for env in spec.get("key_envs") or ())
             for spec in PROVIDER_SPECS
         },
     }
     _summary_cache["summary"] = (time.monotonic(), result)
+    return result
+
+
+# --- gateway-native OAuth snapshots (Codex / Claude) ---------------------------
+#
+# The desktop chip used to read these from a gateway RPC named `account.usage`
+# that no Hermes gateway ever registered (absent from the OpenRPC contract), so
+# the `.catch(() => null)` swallowed it and the Codex/Claude chips silently
+# never appeared. Hermes itself already knows how to query these accounts from
+# the OAuth credentials in auth.json — `agent.account_usage.fetch_account_usage`
+# (the same path the CLI's /usage command uses). This route exposes that through
+# the plugin's own backend, in the exact snapshot shape mapGatewayProviders()
+# expects. Fail-open: a provider with no credential or a dead upstream yields
+# no snapshot rather than an error.
+
+ACCOUNT_USAGE_TTL_SECONDS = 45
+ACCOUNT_USAGE_DEADLINE_SECONDS = 25
+_account_usage_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+# Providers Hermes ships an account-usage fetcher for and this chip displays.
+_NATIVE_USAGE_PROVIDERS = ("openai-codex", "anthropic")
+
+
+def _format_reset_local(dt: Any) -> str:
+    """Compact relative reset time, mirroring agent.account_usage._format_reset."""
+    from datetime import datetime, timezone
+
+    if dt is None or not isinstance(dt, datetime):
+        return "unknown"
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        total_seconds = int((dt - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if total_seconds <= 0:
+        return "now"
+    hours, rem = divmod(total_seconds, 3600)
+    minutes = rem // 60
+    if hours >= 24:
+        days, hours = divmod(hours, 24)
+        return f"in {days}d {hours}h"
+    return f"in {hours}h {minutes}m" if hours else f"in {minutes}m"
+
+
+def _snapshot_to_dict(snap: Any) -> dict[str, Any]:
+    from datetime import datetime
+
+    windows: list[dict[str, Any]] = []
+    for win in snap.windows or ():
+        # Audit L1: OAuth percents arrive unclamped (Hermes does a bare
+        # float()), so apply the same finite-only rule as _safe_float —
+        # non-finite values render as "no data", never $inf/NaN/500.
+        raw_pct = getattr(win, "used_percent", None)
+        try:
+            pct = float(raw_pct) if raw_pct is not None else None
+        except (TypeError, ValueError):
+            pct = None
+        if pct is not None and not math.isfinite(pct):
+            pct = None
+        reset_at = getattr(win, "reset_at", None)
+        windows.append({
+            "label": win.label,
+            "used_percent": pct,
+            "resetsAt": reset_at.isoformat() if isinstance(reset_at, datetime) else None,
+        })
+    details = list(snap.details or ())
+    for win, out in zip(snap.windows or (), windows):
+        if out["used_percent"] is not None:
+            details.append(
+                f"{win.label}: {round(out['used_percent'])}% used · resets {_format_reset_local(getattr(win, 'reset_at', None))}"
+            )
+    return {
+        "provider": snap.provider,
+        "plan": snap.plan,
+        "title": snap.title,
+        "windows": windows,
+        "details": details,
+    }
+
+
+@router.get("/account_usage")
+def account_usage() -> dict[str, Any]:
+    """OAuth-provider account limits as `{'snapshots': [...]}`.
+
+    Cached in-memory for ``ACCOUNT_USAGE_TTL_SECONDS``; each snapshot carries
+    provider/plan/windows[{label, used_percent, resetsAt}]/details.  Fetches
+    run under an overall deadline (audit L4): credential refreshes can stack
+    ~60s+ across providers, so an expired poll serves the last cached result
+    instead of holding a worker.
+    """
+    now = time.monotonic()
+    cached = _account_usage_cache.get("account_usage")
+    if cached is not None and (now - cached[0]) < ACCOUNT_USAGE_TTL_SECONDS:
+        return cached[1]
+
+    snapshots: list[dict[str, Any]] = []
+    try:
+        from agent.account_usage import fetch_account_usage
+    except Exception:  # noqa: BLE001 - backend without the agent import: stay inert
+        fetch_account_usage = None  # type: ignore[assignment]
+    if fetch_account_usage is not None:
+        def _fetch_snapshot(provider: str) -> dict[str, Any] | None:
+            # Audit L1: conversion inside the per-provider guard — a malformed
+            # snapshot is skipped, never a 500 for the healthy provider too.
+            try:
+                snap = fetch_account_usage(provider)
+            except Exception:  # noqa: BLE001
+                return None
+            if snap is None or not getattr(snap, "available", False):
+                return None
+            try:
+                return _snapshot_to_dict(snap)
+            except Exception:  # noqa: BLE001
+                logger.warning("Provider %s snapshot conversion failed", provider, exc_info=True)
+                return None
+
+        with ThreadPoolExecutor(max_workers=len(_NATIVE_USAGE_PROVIDERS)) as pool:
+            futures = {pool.submit(_fetch_snapshot, p): p for p in _NATIVE_USAGE_PROVIDERS}
+            try:
+                for future in as_completed(futures, timeout=ACCOUNT_USAGE_DEADLINE_SECONDS):
+                    snap = future.result()
+                    if snap is not None:
+                        snapshots.append(snap)
+            except TimeoutError:
+                # Deadline hit: keep whatever arrived and fall through to the
+                # stale-cache check below instead of blocking on refreshes.
+                for future in futures:
+                    future.cancel()
+
+    if not snapshots and cached is not None:
+        return cached[1]  # stale-while-recompute: a failed poll never blanks the chip
+
+    result: dict[str, Any] = {"snapshots": snapshots}
+    _account_usage_cache["account_usage"] = (time.monotonic(), result)
     return result

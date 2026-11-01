@@ -136,3 +136,159 @@ test('widgetProviders tolerates missing payload', () => {
   assert.deepEqual(widgetProviders(undefined), [])
   assert.deepEqual(widgetProviders(null), [])
 })
+
+// --- focused-session model gate (session.info live routes) -------------------
+
+// Slice the UsageChip's gate-resolution logic out of the component. The
+// component itself needs React + the plugin SDK; this reproduces its exact
+// resolution order over pure inputs so the contract is testable:
+//   focused session live route → composer persisted pick → backend default.
+function resolveActiveProvider({ liveRoute, storedProvider, modelSlug }) {
+  let provider = liveRoute
+    ? (providerIdFor(liveRoute.provider, '') || providerIdFor(liveRoute.model, ''))
+    : null
+  if (!provider) provider = providerIdFor(storedProvider, '') || providerIdFor(modelSlug, '')
+  return provider
+}
+
+test('live session route wins over the persisted composer pick', () => {
+  // The bug: composer localStorage stays 'deepseek' (profile-global default)
+  // while the focused chat switched to a Codex model — the chip must follow
+  // the session, not the default.
+  assert.equal(
+    resolveActiveProvider({ liveRoute: { provider: 'openai-codex', model: 'gpt-5-codex' }, storedProvider: 'deepseek', modelSlug: 'deepseek-chat' }),
+    'openai-codex')
+})
+
+test('gate falls back to the composer pick without a live route', () => {
+  // Draft chats (no session yet) still resolve from the persisted provider;
+  // a bare model slug alone is a weaker heuristic (vendor-prefixed openrouter
+  // ids match their prefix's token, which is why tier 2 prefers stored).
+  assert.equal(resolveActiveProvider({ liveRoute: null, storedProvider: 'opencode-go', modelSlug: 'ox-alpha-free' }), 'opencode')
+  assert.equal(resolveActiveProvider({ liveRoute: undefined, storedProvider: '', modelSlug: 'deepseek/deepseek-v4-pro' }), 'deepseek')
+})
+
+test('gate yields to the backend default when composer state is empty', () => {
+  // null here means "ask rest('/active_provider')" — the component's third tier.
+  assert.equal(resolveActiveProvider({ liveRoute: null, storedProvider: '', modelSlug: '' }), null)
+})
+
+// --- gateway-native snapshot mapping -----------------------------------------
+
+// mapGatewayProviders is dependency-free; extract it (and the provider dict
+// it reads) straight from source so the test cannot drift from the shipping
+// GATEWAY_PROVIDERS table.
+const mapGatewayProviders = new Function(
+  `${src.slice(src.indexOf('const GATEWAY_PROVIDERS'), src.indexOf('// --- Config dialog'))}\nreturn mapGatewayProviders`)()
+
+test('mapGatewayProviders consumes the /account_usage snapshot shape', () => {
+  const account = {
+    snapshots: [{
+      provider: 'openai-codex',
+      plan: 'Plus',
+      windows: [
+        { label: 'Session', used_percent: 8.0, resetsAt: minutesFromNow(240) },
+        { label: 'Weekly', used_percent: 76.0, resetsAt: minutesFromNow(2 * 24 * 60) },
+      ],
+      details: ['You have 1 reset credit banked'],
+    }],
+  }
+  const [chip] = mapGatewayProviders(account, null)
+  assert.equal(chip.id, 'gw:openai-codex')
+  assert.equal(chip.gatewaySlug, 'openai-codex')
+  assert.equal(chip.kind, 'percent')
+  assert.equal(chip.value, 8) // headline = first window, used_percent as-is
+  assert.deepEqual(chip.windows.map((w) => w.percent), [8, 76])
+})
+
+test('mapGatewayProviders degrades cleanly on empty or missing payloads', () => {
+  assert.deepEqual(mapGatewayProviders(null, null), [])
+  assert.deepEqual(mapGatewayProviders({ snapshots: [] }, null), [])
+  // a snapshot for an unknown provider slug is skipped, not rendered blank
+  assert.deepEqual(mapGatewayProviders({ snapshots: [{ provider: 'gemini', windows: [] }] }, null), [])
+})
+
+test('mapGatewayProviders sanitizes hostile upstream strings', () => {
+  // Audit L6: OAuth/gateway strings are coerced, control-stripped, and
+  // truncated at the mapping boundary; window ids stay unique even when
+  // upstream labels collide or vanish.
+  const account = {
+    snapshots: [{
+      provider: 'openai-codex',
+      windows: [
+        { label: 'Ses\u0000sion\u202e', used_percent: 8.0 },
+        { label: 'Session', used_percent: 9.0 },
+        { label: '', used_percent: 10.0 },
+        { label: 'x'.repeat(100), used_percent: 11.0 },
+      ],
+      details: ['A'.repeat(500)],
+    }],
+  }
+  const [chip] = mapGatewayProviders(account, null)
+  const labels = chip.windows.map((w) => w.label)
+  assert.deepEqual(labels, ['Session', 'Session', 'Window 3', 'x'.repeat(24)])
+  assert.ok(!labels.some((l) => /[\u0000-\u001f\u202e]/.test(l)))
+  const ids = chip.windows.map((w) => w.id)
+  assert.equal(new Set(ids).size, ids.length)
+  assert.equal(chip.detail.length, 200)
+})
+
+test('mapGatewayProviders truncates hostile bars display text', () => {
+  const bars = {
+    plan_bar: { pct_used: 30 },
+    subscription_remaining_display: 'B'.repeat(500),
+  }
+  const [chip] = mapGatewayProviders(null, bars)
+  assert.equal(chip.id, 'gw:nous')
+  assert.equal(chip.detail.length, 200)
+})
+
+test('mapGatewayProviders never emits unreachable provider slugs', () => {
+  // Audit M1: Cursor/Kimi/OpenRouter have no snapshot path — a snapshot
+  // claiming those slugs must not render.
+  const account = {
+    snapshots: [
+      { provider: 'cursor', windows: [{ label: 'W', used_percent: 1 }] },
+      { provider: 'kimi', windows: [{ label: 'W', used_percent: 1 }] },
+      { provider: 'openrouter', windows: [{ label: 'W', used_percent: 1 }] },
+    ],
+  }
+  assert.deepEqual(mapGatewayProviders(account, null), [])
+})
+
+// --- per-profile backend gate -------------------------------------------------
+
+// Second slice: the backend-missing classifier sits below `WindowBadge`, so it
+// falls outside the pure-function block sliced above.
+const restStart = src.indexOf('function restMissingRoute')
+assert.ok(restStart > 0, 'restMissingRoute slice marker not found')
+let restDepth = 0
+let restEnd = -1
+for (let i = src.indexOf('{', restStart); i < src.length; i += 1) {
+  if (src[i] === '{') restDepth += 1
+  else if (src[i] === '}') {
+    restDepth -= 1
+    if (restDepth === 0) {
+      restEnd = i + 1
+      break
+    }
+  }
+}
+assert.ok(restEnd > restStart, 'restMissingRoute body not closed')
+const restMissingRoute = new Function(`${src.slice(restStart, restEnd)}\nreturn restMissingRoute`)()
+
+test('restMissingRoute recognizes an unmounted plugin backend', () => {
+  // The agent half mounts per profile (plugins.enabled) while the desktop half
+  // is app-level, so this 404 is the ordinary state of a profile that never
+  // enabled the plugin — not a broken key.
+  assert.equal(restMissingRoute(new Error('404: Not Found')), true)
+  assert.equal(restMissingRoute('404: {"detail":"Not Found"}'), true)
+  assert.equal(restMissingRoute(new Error('405: Method Not Allowed')), true)
+})
+
+test('restMissingRoute leaves real faults and working backends alone', () => {
+  assert.equal(restMissingRoute(new Error('401: Unauthorized')), false)
+  assert.equal(restMissingRoute(new Error('500: Internal Server Error')), false)
+  assert.equal(restMissingRoute(new Error('Hermes desktop bridge unavailable')), false)
+  assert.equal(restMissingRoute(undefined), false)
+})
