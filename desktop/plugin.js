@@ -154,6 +154,45 @@ function widgetProviders(allProviders) {
     p.error !== 'no-api-key' && !(p.gatewaySlug && p.kind === 'note'))
 }
 
+// The composer's persisted provider pick. Current app builds write it under a
+// SCOPED key — '<key>.registry.<connection>.<profile>'
+// ('hermes.desktop.composer.provider.registry.local.default') — and no longer
+// write the bare key, so reading only the bare one returns '' and the caller
+// falls through to substring-matching the bare model id. That misroutes an
+// aggregator-served model whose name contains another provider's token
+// ('deepseek-v4.1-flash', 'glm-*', 'kimi-*' via OpenCode) to that provider's
+// row — the chip then reports a provider the user may have no key for, and
+// shows nothing for the provider actually serving the model.
+const COMPOSER_PROVIDER_KEY = 'hermes.desktop.composer.provider'
+
+function persistedComposerProvider(storage) {
+  if (!storage) {
+    return ''
+  }
+
+  try {
+    const exact = storage.getItem(COMPOSER_PROVIDER_KEY) || ''
+
+    if (exact) {
+      return exact
+    }
+
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i)
+
+      if (key && key !== COMPOSER_PROVIDER_KEY && key.startsWith(COMPOSER_PROVIDER_KEY)) {
+        const scoped = storage.getItem(key) || ''
+
+        if (scoped) {
+          return scoped
+        }
+      }
+    }
+  } catch { /* storage unavailable (private mode / no window) */ }
+
+  return ''
+}
+
 function WindowBadge({ w }) {
   const text = w.percent == null ? '—' : `${Math.round(w.percent)}%`
   const reset = resetCountdown(w.resetsAt)
@@ -474,9 +513,9 @@ function UsageChip({ rest, storage }) {
 
   // Model gate. The composer persists its pick as TWO localStorage entries:
   // 'hermes.desktop.composer.model' (exposed live via host.state.model) and
-  // 'hermes.desktop.composer.provider' (e.g. 'opencode-go' / 'openrouter').
-  // The provider entry is the authoritative signal — model ids are bare
-  // names ('ox-alpha-free') or vendor-prefixed openrouter ids
+  // the provider key persistedComposerProvider() resolves (e.g. 'opencode-go' /
+  // 'openrouter'). The provider entry is the authoritative signal — model ids
+  // are bare names ('ox-alpha-free') or vendor-prefixed openrouter ids
   // ('deepseek/deepseek-v4-pro') whose prefix is NOT the serving provider.
   // Resolution order: persisted provider → token match on the model id →
   // backend's configured default. ('config.get' is not a plugin-reachable
@@ -484,10 +523,7 @@ function UsageChip({ rest, storage }) {
   useEffect(() => {
     let cancelled = false
     const resolve = async () => {
-      let stored = ''
-      try {
-        stored = window.localStorage.getItem('hermes.desktop.composer.provider') || ''
-      } catch { /* localStorage unavailable */ }
+      const stored = persistedComposerProvider(window.localStorage)
       let provider = providerIdFor(stored, '') || providerIdFor(modelSlug, '')
       if (!provider && rest) {
         try {
